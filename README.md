@@ -2,7 +2,8 @@
 
 **You describe the dataset you wish existed; Spider roams the web, gathers the
 scattered pieces, links them together, and builds it for you as a clean
-database with the source of every value.**
+database with the source of every value. 
+Project Spider uses technology to reduce the time and effort spent collecting and verifying information from the web. By automating data collection, standardizing scattered information, and preserving source evidence, it turns fragmented web data into trusted, reusable datasets. This enables developers, researchers, and organizations to make faster, more reliable, and data-driven decisions, creating a more efficient future.**
 
 Spider is project-local, like git. Run `spider init` once in your project
 folder, say what data you want in `spider.yaml`, and read the result back
