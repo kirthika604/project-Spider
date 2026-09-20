@@ -46,7 +46,8 @@ def test_the_reference_covers_what_spider_yaml_actually_reads():
                 "if_missing", "explain", "review", "level", "on_conflict",
                 "min_confidence", "normal_form", "keep_provenance", "formats",
                 "targets", "shape", "provenance", "nesting", "naming",
-                "sort_by", "split"):
+                "sort_by", "split", "season_scheme", "area", "bbox", "tags",
+                "match", "label", "rates", "workers", "currency", "limit"):
         assert key in leaves, f"spider.yaml reads `{key}` but nothing explains it"
 
 

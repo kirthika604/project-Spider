@@ -11,7 +11,7 @@ A short name for this dataset. It names the export files.
 **Type** text &middot; **Default** `spider-project`
 
 ```yaml
-project: himalayan-plants
+project: chennai-places
 ```
 
 ### `mode`
@@ -44,6 +44,16 @@ The sentence you started from. Spider keeps it to write search queries and to su
 
 ```yaml
 described_as: "plants and their uses"
+```
+
+### `season_scheme`
+
+Which calendar `season_of(month)` uses: `northern` (winter Dec-Feb, spring Mar-May, summer Jun-Aug, autumn Sep-Nov), `southern` (the same, six months apart) or `india` (six seasons, including the monsoon). It is never assumed to be a monsoon unless you say so.
+
+**Type** choice &middot; **Default** `northern` &middot; **One of** `northern`, `southern`, `india`
+
+```yaml
+season_scheme: india
 ```
 
 ### `derive_policy`
@@ -193,7 +203,7 @@ max_ai_pages: 50
 
 ### `sources.items`
 
-Sources you name one by one: a site, a PDF, a spreadsheet, a folder, a JSON endpoint or a feed. Each carries its own tier.
+Sources you name one by one: a site, a PDF, a spreadsheet, a folder, a JSON endpoint, a feed, or places from OpenStreetMap (`type: osm`). Each carries its own tier.
 
 **Type** list of sources &middot; **Default** `[]`
 
@@ -201,6 +211,50 @@ Sources you name one by one: a site, a PDF, a spreadsheet, a folder, a JSON endp
 items:
   - {id: survey, type: xlsx, location: data/survey.xlsx,
      tier: 0, map: {Species: scientific_name}}
+```
+
+### `sources.items[].area`
+
+For `type: osm`: the name of a place. Spider asks OpenStreetMap where it is and fetches what you ask for inside it - no list of names needed.
+
+**Type** text
+
+```yaml
+area: Chennai
+```
+
+Or give `bbox:` yourself: [south, west, north, east].
+
+### `sources.items[].bbox`
+
+For `type: osm`: a bounding box, when you would rather not name a place.
+
+**Type** list of 4 numbers
+
+```yaml
+bbox: [12.80, 80.10, 13.25, 80.35]
+```
+
+### `sources.items[].tags`
+
+For `type: osm`: what to fetch, as OpenStreetMap tags. Required - without it Spider would try to fetch everything in the area.
+
+**Type** map or list
+
+```yaml
+tags: {amenity: cafe}
+```
+
+Also: ["amenity=cafe", "shop"]. A bare key means any value.
+
+### `sources.items[].limit`
+
+For `type: osm`: the most features to fetch.
+
+**Type** number &middot; **Default** `20000`
+
+```yaml
+limit: 5000
 ```
 
 ### `sources.items[].tier`
@@ -282,6 +336,30 @@ identity: [scientific_name]
 ```
 
 Choose something stable: a scientific name, not a common one.
+
+### `entities.<name>.match`
+
+Whether two spellings of a name may be merged into one record. `fuzzy` merges close variants of a name (Garwhal / Garhwal); `exact` merges only identical ones. Identifiers are never fuzzy-matched, and names that differ in a digit are never merged.
+
+**Type** choice &middot; **Default** `fuzzy` &middot; **One of** `fuzzy`, `exact`
+
+```yaml
+match: exact
+```
+
+Use exact when a wrong merge would cost more than a missed one.
+
+### `entities.<name>.label`
+
+The field a person would call a record by. `identity` decides two pages are the same thing (a UPC, an id); `label` is what shows in reports and what `spider explain` looks up.
+
+**Type** text &middot; **Default** `the identity value`
+
+```yaml
+label: title
+```
+
+The identity value stays findable as an alias.
 
 ### `entities.<name>.fields`
 
@@ -568,13 +646,27 @@ dates: iso8601
 
 ### `standardize.currency`
 
-The currency amounts are converted to.
+The one currency to store every amount in. Leave it out and each amount keeps the currency it was written in. A field's own `unit:` (for example `unit: gbp`) overrides this for that field.
 
-**Type** text &middot; **Default** `INR`
+**Type** text &middot; **Default** `none - amounts keep their own currency`
 
 ```yaml
-currency: INR
+currency: USD
 ```
+
+Converting between currencies needs `standardize.rates`.
+
+### `standardize.rates`
+
+What each currency is worth, on any one scale you choose, so amounts can be converted. Spider has no exchange rates of its own and will not invent one: with no rate, a mismatch is rejected with the reason.
+
+**Type** map of currency to number &middot; **Default** `{}`
+
+```yaml
+rates: {USD: 1.0, GBP: 1.27, INR: 0.012}
+```
+
+Use the rate for the date your data is about.
 
 ### `standardize.on_conflict`
 

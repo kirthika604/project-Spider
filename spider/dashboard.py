@@ -391,6 +391,10 @@ def screen_dataset(conn, spec, root: Path) -> None:
         st.caption("Run `spider fill` to search for these.")
 
 
+def _use_recipe(recipe: str) -> None:
+    st.session_state["formula"] = recipe
+
+
 # ------------------------------------------------------------ calculate
 def screen_calculate(conn, spec, root: Path) -> None:
     """Say how a column should be worked out, and see it run before keeping it."""
@@ -494,9 +498,11 @@ def screen_calculate(conn, spec, root: Path) -> None:
         columns = st.columns([2, 4, 1])
         columns[0].write(title)
         columns[1].code(recipe, language="text")
-        if columns[2].button("Use", key=f"recipe-{title}"):
-            st.session_state["formula"] = recipe
-            st.rerun()
+        # a callback, not an assignment here: the formula box has already been
+        # drawn this run, and Streamlit refuses to change a widget's value after
+        # that. A callback runs first, before the script draws anything.
+        columns[2].button("Use", key=f"recipe-{title}", on_click=_use_recipe,
+                          args=(recipe,))
 
 
 # --------------------------------------------------- schema and rules tab

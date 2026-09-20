@@ -44,6 +44,13 @@ SETTINGS: list[Setting] = [
             "The sentence you started from. Spider keeps it to write search "
             "queries and to summarise pages.",
             "text", "", example='described_as: "plants and their uses"'),
+    Setting("season_scheme",
+            "Which calendar `season_of(month)` uses: `northern` (winter Dec-Feb, "
+            "spring Mar-May, summer Jun-Aug, autumn Sep-Nov), `southern` (the "
+            "same, six months apart) or `india` (six seasons, including the "
+            "monsoon). It is never assumed to be a monsoon unless you say so.",
+            "choice", "northern", ("northern", "southern", "india"),
+            example="season_scheme: india"),
     Setting("derive_policy",
             "How much Spider may calculate without asking. `suggest` proposes and "
             "waits; `auto_safe` applies only exact conversions and counts; `off` "
@@ -114,10 +121,28 @@ SETTINGS: list[Setting] = [
             "number", "100", example="max_ai_pages: 50"),
     Setting("sources.items",
             "Sources you name one by one: a site, a PDF, a spreadsheet, a folder, "
-            "a JSON endpoint or a feed. Each carries its own tier.",
+            "a JSON endpoint, a feed, or places from OpenStreetMap (`type: osm`). "
+            "Each carries its own tier.",
             "list of sources", "[]",
             example=("items:\n  - {id: survey, type: xlsx, location: data/survey.xlsx,"
                      "\n     tier: 0, map: {Species: scientific_name}}")),
+    Setting("sources.items[].area",
+            "For `type: osm`: the name of a place. Spider asks OpenStreetMap where "
+            "it is and fetches what you ask for inside it - no list of names "
+            "needed.",
+            "text", "", example="area: Chennai",
+            note="Or give `bbox:` yourself: [south, west, north, east]."),
+    Setting("sources.items[].bbox",
+            "For `type: osm`: a bounding box, when you would rather not name a place.",
+            "list of 4 numbers", "", example="bbox: [12.80, 80.10, 13.25, 80.35]"),
+    Setting("sources.items[].tags",
+            "For `type: osm`: what to fetch, as OpenStreetMap tags. Required - "
+            "without it Spider would try to fetch everything in the area.",
+            "map or list", "", example="tags: {amenity: cafe}",
+            note="Also: [\"amenity=cafe\", \"shop\"]. A bare key means any value."),
+    Setting("sources.items[].limit",
+            "For `type: osm`: the most features to fetch.",
+            "number", "20000", example="limit: 5000"),
     Setting("sources.items[].tier",
             "How much you trust this one source. Tier 0 means you vouch for it "
             "yourself, and its values start at 0.95.",
