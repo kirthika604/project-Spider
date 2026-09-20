@@ -107,6 +107,8 @@ class EntitySpec:
     identity: list[str] = field(default_factory=list)
     fields: dict[str, FieldSpec] = field(default_factory=dict)
     aliases_from: list[str] = field(default_factory=list)
+    label: str | None = None          # the field a person would call this record by
+    match: str = "fuzzy"              # fuzzy | exact: whether spelling variants merge
 
     @classmethod
     def parse(cls, name: str, raw: Any) -> "EntitySpec":
@@ -123,7 +125,8 @@ class EntitySpec:
         if isinstance(alias_from, str):
             alias_from = [alias_from]
         return cls(name=name, identity=list(identity), fields=fields,
-                   aliases_from=list(alias_from))
+                   aliases_from=list(alias_from), label=raw.get("label"),
+                   match=str(raw.get("match", "fuzzy")).lower())
 
 
 @dataclass
@@ -202,17 +205,30 @@ class DerivedSpec:
         )
 
     def referenced_fields(self) -> list[str]:
-        """Field names this derivation reads, from `inputs` or the formula."""
+        """The fields this derivation reads, from `inputs` or from the formula.
+
+        The formula is read as a syntax tree, so a unit written as text - the
+        'm' in convert(x, 'm', 'ft') - is not mistaken for a field called m,
+        which a search through the raw text cannot tell apart.
+        """
         if self.inputs:
             return [i.split(".")[0].strip() for i in self.inputs]
-        names = []
-        if self.formula:
-            for token in re.findall(r"[A-Za-z_][A-Za-z0-9_.]*", self.formula):
-                base = token.split(".")[0]
-                if base not in FORMULA_FUNCTIONS and base not in (
-                        "via", "over", "and", "or", "not", "asc", "desc"):
-                    names.append(base)
-        return names
+        if not self.formula:
+            return []
+        try:
+            from .derive.formula import referenced_names
+            names = referenced_names(self.formula)
+        except Exception:
+            names = []
+        out = []
+        for name in names:
+            for suffix in ("__min", "__max", "__value", "__count"):
+                if name.endswith(suffix):
+                    name = name[: -len(suffix)]
+                    break
+            if name not in FORMULA_FUNCTIONS and name not in out:
+                out.append(name)
+        return out
 
 
 NUMERIC_TEXT = re.compile(r"^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$")
@@ -249,7 +265,8 @@ def _fix_yaml_booleans(raw: dict) -> dict:
 
 
 FORMULA_FUNCTIONS = {
-    "min", "max", "avg", "count", "sum", "band", "season_of", "if", "convert",
+    "min", "max", "avg", "count", "sum", "band", "season_of", "place_parent", "if",
+    "convert",
     "round", "abs", "len", "lower", "upper", "concat", "midpoint", "year_of",
     # maths
     "sqrt", "pow", "log", "log10", "exp", "floor", "ceil", "sign", "clamp",
@@ -257,6 +274,11 @@ FORMULA_FUNCTIONS = {
     # geography and trigonometry
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "hypot",
     "radians", "degrees", "distance_km",
+    # text
+    "contains", "word", "replace", "number", "startswith", "endswith", "trim",
+    "substr", "coalesce", "is_empty",
+    # dates
+    "days_between", "years_between", "month_of", "day_of", "weekday_of",
     # statistics across a column
     "mean", "median", "stdev", "variance", "total", "spread", "smallest",
     "largest", "records", "percentile", "zscore", "normalize", "rank", "share",
@@ -279,6 +301,10 @@ class SourceItem:
     ai_allowed: bool = True
     key_env: str | None = None       # environment variable holding an API key
     license: str | None = None
+    area: str | None = None          # type osm: a place name, resolved to a bounding box
+    bbox: list = field(default_factory=list)   # type osm: south, west, north, east
+    tags: Any = None                 # type osm: {amenity: cafe} or ["amenity=cafe"]
+    limit: int | None = None         # type osm: the most features to fetch
 
     @classmethod
     def parse(cls, raw: Any, index: int = 0) -> "SourceItem":
@@ -298,6 +324,9 @@ class SourceItem:
             pages=str(raw["pages"]) if raw.get("pages") is not None else None,
             map=raw.get("map") or {}, ai_allowed=bool(raw.get("ai_allowed", True)),
             key_env=raw.get("key_env"), license=raw.get("license"),
+            area=raw.get("area"), bbox=list(raw.get("bbox") or []),
+            tags=raw.get("tags"),
+            limit=int(raw["limit"]) if raw.get("limit") is not None else None,
         )
 
 
@@ -313,6 +342,8 @@ def guess_source_type(location: str) -> str:
                 or path.endswith(("/api", ".json")) or "format=json" in query):
             return "api"
         return "website"
+    if low.startswith("osm:"):
+        return "osm"
     for ext, kind in ((".pdf", "pdf"), (".csv", "csv"), (".tsv", "csv"),
                       (".xlsx", "xlsx"), (".xls", "xlsx"), (".json", "json"),
                       (".txt", "text"), (".md", "text"), (".docx", "text")):
@@ -383,7 +414,8 @@ def domain_of(url: str) -> str:
 class StandardizeSpec:
     level: str = "standard"
     dates: str = "iso8601"
-    currency: str = "INR"
+    currency: str = ""                    # empty: keep the currency as written
+    rates: dict = field(default_factory=dict)
     on_conflict: str = "keep_all_and_flag"
     min_confidence: float = 0.5
 
@@ -393,7 +425,9 @@ class StandardizeSpec:
         return cls(
             level=str(raw.get("level", "standard")),
             dates=str(raw.get("dates", "iso8601")),
-            currency=str(raw.get("currency", "INR")),
+            currency=str(raw.get("currency") or "").upper(),
+            rates={str(k).upper(): float(v)
+                   for k, v in (raw.get("rates") or {}).items()},
             on_conflict=str(raw.get("on_conflict", "keep_all_and_flag")),
             min_confidence=float(raw.get("min_confidence", 0.5)),
         )
@@ -496,6 +530,7 @@ class Spec:
     output: OutputSpec = field(default_factory=OutputSpec)
     connectors: list[dict] = field(default_factory=list)
     derive_policy: str = "suggest"
+    season_scheme: str = "northern"
     ai: dict = field(default_factory=dict)
     path: Path | None = None
     raw: dict = field(default_factory=dict)
@@ -537,6 +572,7 @@ class Spec:
             output=OutputSpec.parse(raw.get("output")),
             connectors=list(raw.get("connectors") or []),
             derive_policy=str(raw.get("derive_policy", "suggest")),
+            season_scheme=str(raw.get("season_scheme", "northern")).lower(),
             ai=raw.get("ai") or {},
             raw=raw,
         )
@@ -583,6 +619,11 @@ class Spec:
         if not 0 <= self.standardize.min_confidence <= 1:
             add(Problem("error", "standardize.min_confidence",
                         "must be between 0 and 1", "try 0.5"))
+        from .standardize.dates import SEASON_SCHEMES
+        if self.season_scheme not in SEASON_SCHEMES:
+            add(Problem("error", "season_scheme",
+                        f"unknown season scheme '{self.season_scheme}'",
+                        f"use one of {', '.join(SEASON_SCHEMES)}"))
         if self.derive_policy not in DERIVE_POLICIES:
             add(Problem("error", "derive_policy", f"unknown policy '{self.derive_policy}'",
                         "use suggest, auto_safe or off"))
@@ -601,6 +642,14 @@ class Spec:
             if not ent.identity:
                 add(Problem("warning", f"entities.{ename}", "no identity key",
                             "add `identity: [field]` so records can be merged"))
+            if ent.match not in ("fuzzy", "exact"):
+                add(Problem("error", f"entities.{ename}.match",
+                            f"unknown match '{ent.match}'",
+                            "use fuzzy (merge spelling variants) or exact"))
+            if ent.label and ent.label not in ent.fields:
+                add(Problem("error", f"entities.{ename}.label",
+                            f"label field '{ent.label}' is not defined",
+                            f"add '{ent.label}' under entities.{ename}.fields"))
             for key in ent.identity:
                 if key not in ent.fields:
                     add(Problem("error", f"entities.{ename}.identity",
@@ -786,10 +835,18 @@ class Spec:
             ent = self.entities[der.on]
             known = set(ent.fields) | set(self.derived) | {r.to_entity for r in self.relations}
             known |= {e for e in self.entities}
+            import difflib
             for ref in der.referenced_fields():
                 if ref not in known and not ref.isdigit():
-                    problems.append(Problem("warning", where, f"input '{ref}' is not a known field",
-                                            f"check spelling against entities.{der.on}.fields"))
+                    from .derive.formula import suggest
+                    close = suggest(ref, known)
+                    hint = (f"did you mean '{close}'?" if close else
+                            f"the fields of {der.on} are: "
+                            f"{', '.join(list(ent.fields)[:8])}")
+                    problems.append(Problem(
+                        "error", where, f"'{ref}' is not a field of {der.on}",
+                        f"{hint} - a misspelt field gives empty cells and no error "
+                        f"at build time"))
         problems.extend(self._find_cycles())
         return problems
 
@@ -834,18 +891,39 @@ class Spec:
         fld = self.entity_field(entity, fieldname)
         return (fld.on_conflict if fld and fld.on_conflict else self.standardize.on_conflict)
 
+    def own_domains(self) -> set:
+        """The sites the user named themselves: seeds and website sources."""
+        names = {domain_of(u) for u in self.sources.all_seeds()}
+        names |= {domain_of(i.location) for i in self.sources.items
+                  if i.type == "website" and i.location}
+        return {n for n in names if n}
+
     def tier_for(self, url_or_domain: str) -> int:
+        """How much to trust a site, from most specific to least.
+
+        1. what `trust_tiers` says about it
+        2. a guess from the address: government 1, universities and .org 2
+        3. a site you pointed Spider at yourself is at least tier 2. You chose
+           it, so it is not a stranger - and treating it as one would hold back
+           every value from a one-site project, which is what tier 3's 0.40
+           does against the default `min_confidence` of 0.5.
+        4. anything else Spider wanders onto is tier 3.
+        """
         dom = domain_of(url_or_domain) or url_or_domain.lower()
         if dom in self.sources.trust_tiers:
             return self.sources.trust_tiers[dom]
         for known, tier in self.sources.trust_tiers.items():
             if dom.endswith(known):
                 return tier
+        guess = 3
         if dom.endswith(".gov.in") or dom.endswith(".gov") or dom.endswith(".nic.in"):
-            return 1
-        if dom.endswith(".edu") or dom.endswith(".ac.in") or dom.endswith(".org"):
+            guess = 1
+        elif dom.endswith(".edu") or dom.endswith(".ac.in") or dom.endswith(".org"):
+            guess = 2
+        if guess > 2 and any(dom == own or dom.endswith("." + own)
+                             for own in self.own_domains()):
             return 2
-        return 3
+        return guess
 
     def dump(self) -> str:
         return yaml.safe_dump(self.raw, sort_keys=False, allow_unicode=True)

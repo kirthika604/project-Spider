@@ -7,7 +7,9 @@ conflict rule, score confidence, write attributes, then derive.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..derive.engine import DeriveEngine
 from ..extract import sanity
@@ -18,6 +20,24 @@ from ..store.db import jdump, now
 from . import relations as rel_store
 from .confidence import score
 from .entities import EntityIndex
+
+
+MAX_REJECTION_EXAMPLES = 500
+FLUSH_EVERY = 5000
+
+
+def _scratch_dir(conn):
+    """Where oversize candidate sets spill: beside the project database."""
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return Path(row[2]).parent if row and row[2] else Path(".")
+
+
+def _flush_aliases(index, pending: list) -> None:
+    for alias in pending:
+        entity_id = index.resolve(alias.entity_type, alias.identity)
+        if entity_id:
+            index.add_alias(entity_id, alias.alias, alias.language, alias.source)
+    pending.clear()
 
 
 @dataclass
@@ -37,9 +57,11 @@ class BuildReport:
     defaults: int = 0
     derive_errors: list[str] = field(default_factory=list)
     described: list[str] = field(default_factory=list)
+    derive_detail: dict = field(default_factory=dict)
     standardization: dict = field(default_factory=dict)
     merges: list[str] = field(default_factory=list)
-    rejections: list[tuple] = field(default_factory=list)
+    rejections: list[tuple] = field(default_factory=list)      # a few examples
+    rejection_counts: Counter = field(default_factory=Counter)  # every one, counted
     ai_calls: int = 0
     ai_cache_hits: int = 0
     connectors: dict = field(default_factory=dict)
@@ -47,6 +69,17 @@ class BuildReport:
     normal_form: str = "3NF"
     passed_check: bool = True
     check_problems: list[str] = field(default_factory=list)
+
+    def reject(self, url, what, why, count: bool = True) -> None:
+        """Count a rejection and keep the first few as examples.
+
+        A million-row file with a bad column would otherwise keep a million
+        tuples in memory just to be able to say "1,000,000 rejected".
+        """
+        if count:
+            self.rejection_counts[(what, why[:70])] += 1
+        if len(self.rejections) < MAX_REJECTION_EXAMPLES:
+            self.rejections.append((url, what, why))
     decisions_applied: int = 0
 
 
@@ -69,25 +102,43 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
     standardizer = Standardizer(conn, spec)
     index = EntityIndex(conn, spec)
 
+    # Only the ids are held in memory. Loading every page at once means every
+    # page's full text at once: fine for a spreadsheet's short rows, gigabytes
+    # for a crawl of real web pages.
     if page_ids:                      # a preview builds from its own sample only
         marks = ",".join("?" for _ in page_ids)
-        pages = conn.execute(
-            f"SELECT * FROM pages WHERE relevance > 0 AND id IN ({marks}) "
-            f"ORDER BY tier, id", list(page_ids)).fetchall()
+        ordered_ids = [r[0] for r in conn.execute(
+            f"SELECT id FROM pages WHERE relevance > 0 AND id IN ({marks}) "
+            f"ORDER BY tier, id", list(page_ids))]
     else:
-        query = "SELECT * FROM pages WHERE relevance > 0 ORDER BY tier, id"
+        query = "SELECT id FROM pages WHERE relevance > 0 ORDER BY tier, id"
         if limit:
             query += f" LIMIT {int(limit)}"
-        pages = conn.execute(query).fetchall()
+        ordered_ids = [r[0] for r in conn.execute(query)]
+
+    def pages_one_by_one():
+        for page_id in ordered_ids:
+            row = conn.execute("SELECT * FROM pages WHERE id=?", (page_id,)).fetchone()
+            if row is not None:
+                yield row
+
+    pages = pages_one_by_one()
 
     # ------------------------------------------- 1. extract and standardize
-    cells: dict[tuple[int, str], list] = {}
-    all_relations, all_aliases = [], []
+    from .spool import CellStore
+    cells = CellStore(scratch_dir=_scratch_dir(conn))
+    pending_relations: list = []
+    pending_aliases: list = []
     for page in pages:
         report.pages_read += 1
         candidates, relation_candidates, alias_candidates = extractor.run(page)
-        all_relations.extend(relation_candidates)
-        all_aliases.extend(alias_candidates)
+        pending_relations.extend(relation_candidates)
+        pending_aliases.extend(alias_candidates)
+        if len(pending_aliases) >= FLUSH_EVERY:
+            _flush_aliases(index, pending_aliases)
+        if len(pending_relations) >= FLUSH_EVERY:
+            report.relations += rel_store.save(conn, index, pending_relations, spec)
+            pending_relations = []
         on_event("page", url=page["url"], values=len(candidates))
         for candidate in candidates:
             report.candidates += 1
@@ -95,8 +146,8 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
                                                 candidate.field, candidate.raw_value)
             if standard.rejected:
                 report.rejected_vocab += 1
-                report.rejections.append((candidate.url, f"{candidate.entity_type}."
-                                          f"{candidate.field}", standard.reason))
+                report.reject(candidate.url, f"{candidate.entity_type}."
+                              f"{candidate.field}", standard.reason)
                 _queue(conn, "strict_reject", f"{candidate.entity_type}.{candidate.field}",
                        None, candidate.field, standard.reason,
                        {"value": candidate.raw_value, "url": candidate.url})
@@ -105,8 +156,8 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
             passes, reason = sanity.check(field_spec, standard)
             if not passes:
                 report.rejected_sanity += 1
-                report.rejections.append((candidate.url, f"{candidate.entity_type}."
-                                          f"{candidate.field}", reason))
+                report.reject(candidate.url, f"{candidate.entity_type}."
+                              f"{candidate.field}", reason)
                 _queue(conn, "sanity", f"{candidate.entity_type}.{candidate.field}",
                        None, candidate.field, reason,
                        {"value": candidate.raw_value, "url": candidate.url,
@@ -119,24 +170,24 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
             entity_id = index.resolve(candidate.entity_type, candidate.identity)
             if not entity_id:
                 continue
-            cells.setdefault((entity_id, candidate.field), []).append(candidate)
+            cells.add(entity_id, candidate.field, candidate)
 
-    for alias in all_aliases:                     # local and common names (D4)
-        entity_id = index.resolve(alias.entity_type, alias.identity)
-        if entity_id:
-            index.add_alias(entity_id, alias.alias, alias.language, alias.source)
+    _flush_aliases(index, pending_aliases)         # local and common names (D4)
     conn.commit()
 
     report.rejected_quote = extractor.stats["rejected"]
+    for url, what, why in extractor.rejected:
+        report.reject(url, what, why, count=False)
+    for (what, why), number in extractor.reject_counts.items():
+        report.rejection_counts[(what, why)] += number
     report.standardization = standardizer.summary()
     report.merges = index.merges
     if ai is not None:
         report.ai_calls, report.ai_cache_hits = ai.calls, ai.cache_hits
 
     # ----------------------------------------- 2. conflicts and confidence
-    for (entity_id, field_name), candidates in cells.items():
-        entity_type = conn.execute("SELECT type FROM entities WHERE id=?",
-                                   (entity_id,)).fetchone()["type"]
+    for (entity_id, field_name), candidates in cells:
+        entity_type = index.type_of(entity_id)
         field_spec = spec.entity_field(entity_type, field_name)
         multiple = bool(field_spec and field_spec.multiple)
         rule = spec.conflict_rule(entity_type, field_name)
@@ -165,8 +216,10 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
             if rule != "keep_all_and_flag":
                 _mark_superseded(conn, entity_id, field_name, loser, decision.rule)
 
+    cells.close()                                  # the scratch file, if there was one
+
     # --------------------------------------------------------- 3. relations
-    report.relations = rel_store.save(conn, index, all_relations, spec)
+    report.relations += rel_store.save(conn, index, pending_relations, spec)
     report.entities = conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
     report.aliases = conn.execute(
         "SELECT COUNT(*) c FROM entity_aliases").fetchone()["c"]
@@ -189,8 +242,12 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
         report.derived = derive_report.written
         report.derive_errors = derive_report.errors
         report.described = derive_report.described
+        report.derive_detail = derive_report.detail
 
     _remember(conn)
+
+    # ----------------------------------------------------------- 5b. labels
+    _apply_labels(conn, spec)
 
     # ---------------------------------------------------------- 6. defaults
     report.defaults = _apply_defaults(conn, spec)
@@ -201,6 +258,11 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
     # asking the same question twice (section 13, stage 4).
     from ..review import reapply
     report.decisions_applied = reapply(conn)
+
+    # After a bulk write the planner has no statistics, and picks the wrong
+    # index for lookups by record. Telling it what the tables now look like is
+    # cheap and keeps every later query on the right one.
+    conn.execute("ANALYZE")
 
     report.attributes = conn.execute(
         "SELECT COUNT(*) c FROM attributes WHERE status='accepted'").fetchone()["c"]
@@ -247,6 +309,38 @@ def _apply_defaults(conn, spec) -> int:
                 written += 1
     conn.commit()
     return written
+
+
+def _apply_labels(conn, spec) -> None:
+    """Name each record by its `label:` field instead of its identity.
+
+    A UPC or an id is what makes two pages the same record, but it is not what
+    anyone reading a report calls it. The old name is kept as an alias, so a
+    record can still be found by either.
+    """
+    for entity_type, ent in spec.entities.items():
+        if not ent.label:
+            continue
+        best: dict = {}
+        for row in conn.execute(
+                "SELECT a.entity_id, a.value FROM attributes a "
+                "JOIN entities e ON e.id = a.entity_id "
+                "WHERE e.type = ? AND a.name = ? AND a.status = 'accepted' "
+                "AND a.value IS NOT NULL ORDER BY a.confidence ASC",
+                (entity_type, ent.label)):
+            best[row["entity_id"]] = (row["value"] or "").strip()   # last = most confident
+        aliases, renames = [], []
+        for row in conn.execute(
+                "SELECT id, canonical_name FROM entities WHERE type = ?", (entity_type,)):
+            label = best.get(row["id"], "")
+            if label and label != row["canonical_name"]:
+                aliases.append((row["id"], row["canonical_name"], "", "", "identity"))
+                renames.append((label, row["id"]))
+        conn.executemany(
+            "INSERT OR IGNORE INTO entity_aliases(entity_id,alias,language,script,"
+            "source) VALUES(?,?,?,?,?)", aliases)
+        conn.executemany("UPDATE entities SET canonical_name=? WHERE id=?", renames)
+    conn.commit()
 
 
 def _remember(conn) -> None:

@@ -19,7 +19,7 @@ anyone's site staying up.
 ```bash
 mkdir /tmp/demo && cd /tmp/demo
 cp <this folder>/spider.yaml <this folder>/gold.csv .
-spider init && spider check && spider crawl && spider build
+spider init --preset himalayan-plants && spider check && spider crawl && spider build
 spider report --gold gold.csv
 ```
 

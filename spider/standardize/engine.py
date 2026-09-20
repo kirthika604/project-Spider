@@ -81,9 +81,16 @@ class Standardizer:
         # dimensions.  Handle it before the generic unit parser, which quite
         # correctly knows nothing about exchange rates.
         if _is_money_field(fld, raw):
-            money = _currency_value(raw, self.spec.standardize.currency)
+            money = _currency_value(raw, fld.unit if fld else None,
+                                    self.spec.standardize.currency,
+                                    self.spec.standardize.rates)
             if money is not None:
-                value, currency, changed = money
+                value, currency, changed, problem = money
+                if problem:
+                    result.rejected = True
+                    result.reason = problem
+                    self._note("values rejected: currency has no rate", raw[:60])
+                    return
                 result.value_num, result.unit = value, currency
                 result.value = _trim(value)
                 if changed:
@@ -186,40 +193,72 @@ def _trim(number: float) -> str:
 # snapshot, not a claim that a historical rate was looked up.  Projects that
 # need accounting-grade historical conversion should retain the raw value and
 # use a dated connector before accepting the result.
-_CURRENCY_TO_USD = {"USD": 1.0, "INR": 1 / 83.0, "EUR": 1.08, "GBP": 1.27}
-_CURRENCY_MARKERS = {
-    "₹": "INR", "rs": "INR", "rs.": "INR", "inr": "INR",
-    "$": "USD", "usd": "USD", "us$": "USD",
-    "€": "EUR", "eur": "EUR", "£": "GBP", "gbp": "GBP",
+# Currency codes Spider recognises when it reads an amount. This is a list of
+# names, not of prices: it says "GBP" is a currency, and nothing about how many
+# of anything a pound is worth.
+_CURRENCY_CODES = {
+    "USD", "EUR", "GBP", "INR", "JPY", "CNY", "AUD", "CAD", "CHF", "NZD", "SGD",
+    "HKD", "SEK", "NOK", "DKK", "KRW", "MXN", "BRL", "ZAR", "AED", "SAR", "LKR",
+    "PKR", "BDT", "NPR", "IDR", "MYR", "THB", "TRY", "RUB", "PLN",
 }
+_CURRENCY_SYMBOLS = {"₹": "INR", "$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY"}
+_CURRENCY_WORDS = {"rs": "INR", "rs.": "INR"}
+
+
+def _currency_of(raw: str) -> str | None:
+    """The currency an amount is written in, or None if it does not say."""
+    for symbol, code in _CURRENCY_SYMBOLS.items():
+        if symbol in raw:
+            return code
+    for word in re.findall(r"\b[A-Za-z]{2,3}\.?(?=\W|$)", raw):
+        low = word.lower()
+        if low in _CURRENCY_WORDS:
+            return _CURRENCY_WORDS[low]
+        if word.upper().rstrip(".") in _CURRENCY_CODES:
+            return word.upper().rstrip(".")
+    return None
 
 
 def _is_money_field(fld, raw: str) -> bool:
-    name = (getattr(fld, "name", "") or "").lower()
     unit = (getattr(fld, "unit", "") or "").upper()
-    low = raw.lower()
-    has_marker = any(marker in raw for marker in ("₹", "$", "€", "£")) or bool(
-        re.search(r"\b(?:rs\.?|inr|usd|eur|gbp)\b", raw, re.IGNORECASE))
-    return (unit in _CURRENCY_TO_USD or any(word in name for word in
-            ("price", "cost", "amount", "currency", "fee", "salary")) or
-            has_marker)
+    name = (getattr(fld, "name", "") or "").lower()
+    if unit in _CURRENCY_CODES:
+        return True
+    if unit:                      # a declared physical unit: not money
+        return False
+    return (_currency_of(raw) is not None or any(
+        word in name for word in ("price", "cost", "amount", "fee", "salary",
+                                  "revenue", "budget", "wage")))
 
 
-def _currency_value(raw: str, target: str) -> tuple[float, str, bool] | None:
+def _currency_value(raw: str, field_unit: str, project_currency: str,
+                    rates: dict) -> tuple:
+    """(amount, currency, converted, problem) for a written amount.
+
+    What an amount is stored in comes from, in order: the field's own declared
+    unit, then the project's `standardize.currency`, then - if neither is set -
+    whatever the source wrote, unchanged. Conversion needs a rate the user gave
+    in `standardize.rates`; Spider has no exchange rates of its own, so without
+    one a mismatch is reported instead of guessed at.
+    """
     match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", raw)
     if not match:
         return None
     amount = float(match.group(0).replace(",", ""))
-    low = raw.lower()
-    source = next((code for marker, code in _CURRENCY_MARKERS.items()
-                   if (marker in ("₹", "$", "€", "£") and marker in raw)
-                   or (marker not in ("₹", "$", "€", "£")
-                       and re.search(rf"\b{re.escape(marker)}\b", low))), None)
-    target = (target or "INR").upper()
-    if source is None:
-        # A field explicitly declared with a currency is already in that unit.
-        return amount, target, False
-    if source not in _CURRENCY_TO_USD or target not in _CURRENCY_TO_USD:
-        return None
-    converted = amount * _CURRENCY_TO_USD[source] / _CURRENCY_TO_USD[target]
-    return converted, target, source != target
+    source = _currency_of(raw)
+    field_code = (field_unit or "").upper()
+    target = (field_code if field_code in _CURRENCY_CODES
+              else (project_currency or "").upper() or None)
+
+    if source is None:                    # no marker: it is in the target already
+        return amount, target or None, False, None
+    if target is None or source == target:
+        return amount, source, False, None
+
+    have = {k.upper(): float(v) for k, v in (rates or {}).items()}
+    if source not in have or target not in have:
+        missing = source if source not in have else target
+        return None, source, False, (
+            f"written in {source} but this field is in {target}, and there is no "
+            f"rate for {missing} - add it under standardize.rates")
+    return amount * have[source] / have[target], target, True, None

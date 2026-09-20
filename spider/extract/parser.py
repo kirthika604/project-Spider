@@ -116,9 +116,32 @@ def parse(html: str, url: str, extract_rules: dict[str, str] | None = None) -> P
     return page
 
 
+ATTRIBUTE_RULE = re.compile(r"^(?P<selector>.+?)@(?P<attr>[A-Za-z_][\w:-]*)$")
+
+
+def split_attribute_rule(rule: str):
+    """`img.cover@alt` reads the `alt` attribute of what `img.cover` selects.
+
+    Plenty of facts are not text at all: a rating is a class, a price a
+    `content` attribute, a link its `href`. The part after the last `@` is the
+    attribute, unless it sits inside brackets (`a[href^='mailto:x@y']`).
+    """
+    match = ATTRIBUTE_RULE.match(rule.strip())
+    if not match or "[" in match.group("attr") or "]" in rule.split("@")[-1]:
+        return rule, None
+    return match.group("selector"), match.group("attr")
+
+
+def _attribute_value(node, attr: str) -> str:
+    value = node.get(attr)
+    if value is None:
+        return ""
+    return " ".join(value) if isinstance(value, list) else str(value)
+
+
 def run_rules(soup: BeautifulSoup, page: ParsedPage,
               rules: dict[str, str]) -> list[tuple[str, str]]:
-    """Apply `-e name=CSS` rules and `regex:` rules (FR-7)."""
+    """Apply `-e name=CSS` rules, `selector@attr` rules and `regex:` rules (FR-7)."""
     found: list[tuple[str, str]] = []
     plain = None
     for name, rule in rules.items():
@@ -136,12 +159,17 @@ def run_rules(soup: BeautifulSoup, page: ParsedPage,
                     found.append((name, value.strip()))
                     break
             else:
+                selector, attr = split_attribute_rule(single)
                 try:
-                    nodes = soup.select(single)
+                    nodes = soup.select(selector)
                 except Exception:
                     continue
                 for node in nodes[:20]:
-                    value = (node.get("content") or node.get_text(" ", strip=True)).strip()
+                    if attr:
+                        value = _attribute_value(node, attr).strip()
+                    else:
+                        value = (node.get("content")
+                                 or node.get_text(" ", strip=True)).strip()
                     if value:
                         found.append((name, value))
     return found

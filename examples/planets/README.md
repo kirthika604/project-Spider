@@ -17,7 +17,7 @@ A dataset where most columns are not on any page. Two sites state a planet's
 ```bash
 mkdir /tmp/planets && cd /tmp/planets
 cp <this folder>/{spider.yaml,gold.csv,moons.csv} .
-spider init && spider ref load moons.csv
+spider init && spider ref load moons.csv     # this example brings its own vocabulary
 spider check && spider crawl && spider build
 spider report --gold gold.csv
 ```

@@ -99,11 +99,25 @@ def _entity_values(conn, entity_id: int) -> dict:
         if row["value_num"] is not None:
             out[f"{row['name']}__min"] = row["value_num"]
             out[f"{row['name']}__max"] = row["value_max"]
-    place = conn.execute(
-        "SELECT lat, lon FROM ref_places p JOIN entities e ON lower(e.canonical_name)="
-        "lower(p.name) WHERE e.id=?", (entity_id,)).fetchone()
-    if place:
-        out["lat"], out["lon"] = place["lat"], place["lon"]
+    # A record that carries its own coordinates - a place you listed, or one a
+    # geocoder just found - is the best source for them. The places reference
+    # is only a fallback, and it is empty unless the project loaded one.
+    lat = next((out[k] for k in ("latitude", "lat") if out.get(k) not in (None, "")),
+               None)
+    lon = next((out[k] for k in ("longitude", "lon", "lng", "long")
+                if out.get(k) not in (None, "")), None)
+    if lat is None or lon is None:
+        place = conn.execute(
+            "SELECT lat, lon FROM ref_places p JOIN entities e ON "
+            "lower(e.canonical_name)=lower(p.name) WHERE e.id=?",
+            (entity_id,)).fetchone()
+        if place and place["lat"] is not None:
+            lat, lon = place["lat"], place["lon"]
+    try:
+        if lat is not None and lon is not None:
+            out["lat"], out["lon"] = float(lat), float(lon)
+    except (TypeError, ValueError):
+        pass
     return out
 
 
@@ -142,10 +156,18 @@ def _record_value(conn, spec, connector, entity_type, entity_id, value) -> bool:
 def _record_check(conn, spec, connector, entity_id, value) -> bool:
     """A cross-check changes confidence, never the value itself."""
     from ..store.db import jdump, now
-    altitude = conn.execute(
-        "SELECT id, value, value_num, value_max, confidence FROM attributes "
-        "WHERE entity_id=? AND name LIKE '%altitude%' AND status='accepted' LIMIT 1",
-        (entity_id,)).fetchone()
+    wanted = getattr(connector, "config", {}).get("compare")
+    if wanted:
+        altitude = conn.execute(
+            "SELECT id, name, value, value_num, value_max, confidence FROM attributes "
+            "WHERE entity_id=? AND name=? AND status='accepted' LIMIT 1",
+            (entity_id, wanted)).fetchone()
+    else:
+        altitude = conn.execute(
+            "SELECT id, name, value, value_num, value_max, confidence FROM attributes "
+            "WHERE entity_id=? AND (name LIKE '%altitude%' OR name LIKE '%elevation%') "
+            "AND status='accepted' AND value_num IS NOT NULL LIMIT 1",
+            (entity_id,)).fetchone()
     if not altitude:
         return False
     measured = float(value.value)
@@ -157,8 +179,9 @@ def _record_check(conn, spec, connector, entity_id, value) -> bool:
         conn.execute(
             "INSERT INTO review_queue(kind,target,entity_id,field,reason,detail,created_at) "
             "VALUES(?,?,?,?,?,?,?)",
-            ("conflict", "altitude vs elevation API", entity_id, "altitude_m",
-             f"the elevation service says {measured:.0f} m but the pages say "
+            ("conflict", f"{altitude['name']} vs elevation API", entity_id,
+             altitude["name"],
+             f"the elevation service says {measured:.0f} m but the sources say "
              f"{altitude['value']}", jdump({"measured": measured,
                                             "claimed": altitude["value"],
                                             "evidence": value.evidence,

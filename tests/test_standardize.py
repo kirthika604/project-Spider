@@ -33,7 +33,7 @@ def test_dates_become_iso_8601(written):
 def test_months_and_seasons():
     assert dates.to_month("July to September") == 7
     assert dates.to_month("08") == 8
-    assert dates.season_of("July") == "monsoon"
+    assert dates.season_of("July", "india") == "monsoon"
     assert dates.season_of("March") == "spring"
 
 
@@ -69,15 +69,56 @@ def test_strict_level_rejects_a_value_outside_its_vocabulary(project, spec):
     assert rejected.rejected and "strict" in rejected.reason
 
 
-def test_currency_amounts_are_converted_and_keep_their_raw_text(project, spec):
+def _money_spec(**standardize):
+    from spider.spec import Spec
+    return Spec.from_dict({
+        "entities": {"item": {"identity": ["name"], "fields": {
+            "name": {"type": "text"},
+            "price_gbp": {"type": "number", "unit": "gbp"},
+            "cost": {"type": "number"}}}},
+        "standardize": standardize})
+
+
+def test_an_amount_keeps_the_currency_it_was_written_in_by_default(project):
+    """There is no default currency: a UK price must not turn into rupees."""
     _root, conn = project
-    spec.entities["plant"].fields["price"] = type(spec.entities["plant"].fields[
-        "altitude_m"])(name="price", type="number", unit="INR")
+    standardizer = Standardizer(conn, _money_spec())
+    result = standardizer.standardize("item", "cost", "\u00a322.50")
+    assert result.value_num == 22.5 and result.unit == "GBP"
+    assert result.raw == "\u00a322.50"
+    assert "currencies converted" not in standardizer.report
+
+
+def test_a_fields_own_unit_decides_what_it_is_stored_in(project):
+    _root, conn = project
+    standardizer = Standardizer(conn, _money_spec(currency="INR"))
+    result = standardizer.standardize("item", "price_gbp", "\u00a345.17")
+    assert result.value_num == 45.17 and result.unit == "GBP"   # not the project's INR
+
+
+def test_spider_has_no_exchange_rates_of_its_own(project):
+    """Inventing a rate would put a number in the dataset with no source."""
+    _root, conn = project
+    result = Standardizer(conn, _money_spec()).standardize("item", "price_gbp", "$12")
+    assert result.rejected
+    assert "no rate for USD" in result.reason and "standardize.rates" in result.reason
+
+
+def test_amounts_convert_at_the_rates_the_user_supplies(project):
+    _root, conn = project
+    spec = _money_spec(rates={"USD": 1.0, "GBP": 1.27, "EUR": 1.08})
     standardizer = Standardizer(conn, spec)
-    result = standardizer.standardize("plant", "price", "$10")
-    assert result.value_num == 830 and result.unit == "INR"
-    assert result.raw == "$10"
+    assert standardizer.standardize("item", "price_gbp", "$12.70").value_num == \
+        pytest.approx(10.0)
+    assert standardizer.standardize("item", "price_gbp", "\u00a310").value_num == 10
     assert "currencies converted" in standardizer.report
+
+
+def test_a_project_can_choose_one_currency_for_everything(project):
+    _root, conn = project
+    spec = _money_spec(currency="USD", rates={"USD": 1.0, "GBP": 1.27})
+    result = Standardizer(conn, spec).standardize("item", "cost", "\u00a310")
+    assert result.unit == "USD" and result.value_num == pytest.approx(12.7)
 
 
 class Candidate:
@@ -135,3 +176,18 @@ def test_a_scientific_field_is_recognised_whatever_it_is_called():
     assert names.is_scientific_field("Taxon Name")
     assert not names.is_scientific_field("common_name")
     assert not names.is_scientific_field("region")
+
+
+def test_the_default_calendar_belongs_to_no_country():
+    """A tool for any subject must not tell a hut in the Alps that July is a
+    monsoon."""
+    assert dates.season_of("July") == "summer"
+    assert dates.season_of("July", "southern") == "winter"
+    assert dates.season_of("July", "india") == "monsoon"
+    assert dates.season_of("January") == "winter"
+    assert dates.season_of("January", "southern") == "summer"
+
+
+def test_an_unknown_calendar_says_which_ones_exist():
+    with pytest.raises(ValueError, match="northern, southern, india"):
+        dates.season_of("July", "martian")

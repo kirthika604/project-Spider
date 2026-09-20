@@ -77,6 +77,12 @@ def cmd_init(args) -> int:
     store.init_project(root)
     conn = store.connect(root)
     from .ref import tables as ref_tables
+    for preset in (args.preset or []):
+        try:
+            ref_tables.load_preset(conn, preset)
+        except ValueError as exc:
+            conn.close()
+            return fail(str(exc))
     loaded = ref_tables.counts(conn)
     conn.close()
     say(f"Created {root / store.SPIDER_DIR / store.DB_NAME}")
@@ -85,7 +91,9 @@ def cmd_init(args) -> int:
     if not (root / "spider.yaml").exists():
         say("")
         say("Next: describe the dataset you want, for example")
-        say('  spider describe "plants of Uttarakhand, where they grow, their uses"')
+        say('  spider describe "cafes in Chennai with their coordinates and ratings"')
+        say('  spider describe "planets with their mass and radius"')
+        say('  spider describe --like my-example.csv     # copy the columns of a file')
         say("or write spider.yaml by hand, then run `spider check`.")
     return EXIT_OK
 
@@ -569,6 +577,11 @@ def cmd_build(args) -> int:
         say(f"Rejected          {result.rejected_quote} no quote proof, "
             f"{result.rejected_sanity} failed sanity, "
             f"{result.rejected_vocab} not in vocabulary")
+    if result.rejection_counts:
+        # say what was turned away and why, not only how many
+        say("Turned away:")
+        for (what, why), count in result.rejection_counts.most_common(6):
+            say(f"  {count:6}  {what}: {why}")
     say(f"Entities          {result.entities}")
     say(f"Values stored     {result.attributes}")
     say(f"Relations         {result.relations}")
@@ -606,6 +619,15 @@ def cmd_build(args) -> int:
             example = (result.standardization.get("examples") or {}).get(change, [])
             suffix = f"   e.g. {example[0]}" if example else ""
             say(f"  {count:4}  {change}{suffix}")
+    for name, (filled, total, missing) in (result.derive_detail or {}).items():
+        if total and filled < total:
+            share = f"{filled} of {total} records"
+            if missing:
+                worst = ", ".join(f"{field} ({count})" for field, count
+                                  in sorted(missing.items(), key=lambda kv: -kv[1])[:3])
+                say(f"  {name}: filled {share}; the rest lacked {worst}")
+            else:
+                say(f"  {name}: filled {share}")
     for error in result.derive_errors[:5]:
         say(f"  derivation: {error}")
 
@@ -633,6 +655,8 @@ def cmd_build(args) -> int:
             say("")
             say(f"{len(remaining)} suggested derivation(s) waiting for you - "
                 f"see `spider report` then `spider derive approve <name>`.")
+
+    _explain_held_back(conn, spec, result)
 
     # the output tables must pass their level check before anything is written
     try:
@@ -672,6 +696,49 @@ def cmd_build(args) -> int:
     say("")
     say("Next: `spider report` to see coverage and anything needing review.")
     return EXIT_OK
+
+
+def _explain_held_back(conn, spec, result) -> None:
+    """If values are waiting for review, say why and how to release them.
+
+    The commonest way to get an empty dataset is not an error at all: every
+    value came from one site, one site scores below `min_confidence`, and the
+    build reports success on zero rows. That must be said out loud.
+    """
+    held = conn.execute(
+        "SELECT COUNT(*) c FROM attributes WHERE status='review' "
+        "AND origin='extracted'").fetchone()["c"]
+    accepted = conn.execute(
+        "SELECT COUNT(*) c FROM attributes WHERE status='accepted' "
+        "AND origin='extracted'").fetchone()["c"]
+    if not held:
+        return
+    floor = spec.standardize.min_confidence
+    top = conn.execute(
+        "SELECT p.domain d, p.tier t, COUNT(*) n, MAX(a.confidence) c "
+        "FROM attributes a JOIN pages p ON p.id = a.source_page "
+        "WHERE a.status='review' AND a.origin='extracted' "
+        "GROUP BY p.domain, p.tier ORDER BY n DESC LIMIT 3").fetchall()
+    say("")
+    if accepted == 0:
+        say(f"NOTHING REACHED THE DATASET. All {held} value(s) are being held "
+            f"for review.")
+    else:
+        say(f"{held} value(s) are being held for review (kept out of the dataset).")
+    say(f"  They score below standardize.min_confidence ({floor}). One source "
+        f"alone scores: tier 1 = 0.80, tier 2 = 0.60, tier 3 = 0.40.")
+    for row in top:
+        say(f"    {row['d']}: {row['n']} value(s), tier {row['t']}, "
+            f"confidence {row['c']}")
+    say("  To release them, do one of:")
+    if top:
+        say(f"    - trust the site:  sources.trust_tiers: {{{top[0]['d']}: 2}}"
+            f"     # 1 official, 2 established")
+    say(f"    - lower the floor: standardize.min_confidence: "
+        f"{min(floor, round((top[0]['c'] if top else floor) or floor, 2))}")
+    say("    - add a second source that says the same thing (agreement raises "
+        "confidence)")
+    say("    - or approve them by hand: `spider report`")
 
 
 # ------------------------------------------------------------------- report
@@ -876,6 +943,15 @@ def cmd_derive(args) -> int:
     from .derive import suggest as suggest_module
     from .derive.engine import DeriveEngine
 
+    if args.action == "functions":
+        conn.close()
+        return _derive_functions(args.name)
+
+    if args.action in ("try", "add"):
+        code = _derive_try_or_add(args, conn, spec)
+        conn.close()
+        return code
+
     if args.action == "list":
         pending = suggest_module.pending(conn)
         if not pending:
@@ -941,6 +1017,130 @@ def cmd_derive(args) -> int:
 
     conn.close()
     return fail(f"unknown action '{args.action}'")
+
+
+def _derive_functions(word) -> int:
+    """Everything a formula may use, with an example of each."""
+    from .derive import catalogue
+    found = catalogue.find(word or "")
+    if word and not found:
+        say(f"Nothing matches '{word}'. Run `spider derive functions` to see all "
+            f"{len(catalogue.CATALOGUE)}.")
+        return EXIT_ERROR
+    if not word:
+        say(f"{len(catalogue.CATALOGUE)} functions you can use in a formula "
+            f"(operators + - * / ** and brackets work too).")
+        say("Try one on your data:  spider derive try \"<formula>\"")
+    for group in catalogue.GROUPS:
+        members = [f for f in found if f.group == group]
+        if not members:
+            continue
+        say("")
+        say(group.upper())
+        for item in members:
+            say(f"  {item.signature}")
+            say(f"      {item.what}")
+            shown = f"      e.g.  {item.example}"
+            if item.result:
+                shown += f"   ->  {item.result}"
+                if item.given:
+                    shown += "   when " + ", ".join(
+                        f"{k} = {'empty' if v is None else v}" for k, v in item.given)
+            say(shown)
+    if not word:
+        say("")
+        say("COMMON RECIPES")
+        for title, formula in catalogue.COOKBOOK:
+            say(f"  {title:34} {formula}")
+    return EXIT_OK
+
+
+def _pick_entity(spec, wanted):
+    if wanted:
+        if wanted not in spec.entities:
+            return None, (f"'{wanted}' is not an entity in spider.yaml "
+                          f"({', '.join(spec.entities)})")
+        return wanted, None
+    if len(spec.entities) == 1:
+        return next(iter(spec.entities)), None
+    return None, ("which entity is this for? Add --on, one of: "
+                  + ", ".join(spec.entities))
+
+
+def _derive_try_or_add(args, conn, spec) -> int:
+    from .derive.preview import preview
+    formula = args.formula_text if args.action == "try" else args.formula_text
+    if args.action == "add":
+        if not args.name or not args.formula_text:
+            return fail('usage: spider derive add <name> "<formula>" --on <entity>')
+    else:
+        formula = args.name or args.formula_text
+        if not formula:
+            return fail('usage: spider derive try "<formula>" [--on <entity>]')
+
+    entity, problem = _pick_entity(spec, args.on)
+    if problem:
+        return fail(problem)
+
+    outcome = preview(conn, spec, entity, formula, samples=args.samples, unit=args.unit)
+    say(f"Formula on {entity}:  {formula}")
+    if outcome.syntax_error:
+        say(f"  cannot use this: {outcome.syntax_error}")
+        say("  `spider derive functions` lists what a formula may contain.")
+        return EXIT_CHECK_FAILED
+    if outcome.unknown:
+        for name, close in outcome.unknown:
+            hint = f" - did you mean '{close}'?" if close else ""
+            say(f"  '{name}' is not a field of {entity}{hint}")
+        say(f"  fields of {entity}: {', '.join(spec.entities[entity].fields)}")
+        return EXIT_CHECK_FAILED
+
+    if outcome.reads:
+        say(f"  reads: {', '.join(outcome.reads)}")
+    if not outcome.scanned:
+        say("  (no records yet - run `spider crawl` and `spider build` to try it on "
+            "real data; the formula itself is valid)")
+    else:
+        say(f"  tried on {outcome.scanned} record(s): {outcome.filled} filled, "
+            f"{outcome.empty} empty" + (f", {outcome.failed} failed" if outcome.failed else ""))
+        from .standardize.units import format_number, parse_number
+
+        def tidy(value):
+            number = parse_number(value) if isinstance(value, (int, float)) else None
+            return format_number(number) if number is not None else value
+
+        for label, value, inputs in outcome.samples:
+            reads = ", ".join(f"{k}={tidy(v)}" for k, v in inputs.items())
+            say(f"    {str(label)[:34]:36} -> {tidy(value)}     ({reads})")
+        for error in outcome.errors:
+            say(f"  error: {error}")
+        if outcome.empty and outcome.missing:
+            worst = ", ".join(f"{k} ({v})" for k, v in
+                              sorted(outcome.missing.items(), key=lambda kv: -kv[1])[:3])
+            say(f"  empty because those records lack: {worst}")
+        if outcome.filled == 0 and outcome.scanned:
+            say("  nothing was filled - the formula is valid but no record has what "
+                "it needs.")
+
+    if args.action == "try":
+        say("")
+        say(f'Keep it with:  spider derive add <name> "{formula}" --on {entity}')
+        return EXIT_OK
+
+    # ---- add: the same check and the same careful edit the dashboard uses
+    from .derive.add import add_derived
+    added = add_derived(spec, args.name, entity, formula, explain=args.explain,
+                        round_to=args.round, unit=args.unit, review=args.review)
+    if not added.ok:
+        if added.problems:
+            for problem in added.problems:
+                say(str(problem))
+            return EXIT_CHECK_FAILED
+        return fail(added.message)
+    say("")
+    say(added.message)
+    say("Run `spider build` to calculate it for every record.")
+    return EXIT_OK
 
 
 # ------------------------------------------------------------------ explain
@@ -1653,6 +1853,9 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("directory", nargs="?", default=".")
     init.add_argument("--force", action="store_true", help="recreate the database")
     init.add_argument("-q", "--quiet", action="store_true")
+    init.add_argument("--preset", action="append", metavar="NAME",
+                      help="also load a bundled reference set (repeatable); "
+                           "see `spider ref list`")
     init.set_defaults(func=cmd_init)
 
     desc = subparsers.add_parser(
@@ -1756,10 +1959,24 @@ def build_parser() -> argparse.ArgumentParser:
     fill.add_argument("-f", "--file")
     fill.set_defaults(func=cmd_fill)
 
-    derive = subparsers.add_parser("derive", help="review calculated fields")
-    derive.add_argument("action", choices=["list", "approve", "edit", "reject", "run"],
-                        nargs="?", default="list")
-    derive.add_argument("name", nargs="?")
+    derive = subparsers.add_parser(
+        "derive", help="define, test and review calculated columns")
+    derive.add_argument("action", choices=["list", "functions", "try", "add", "approve",
+                                           "edit", "reject", "run"],
+                        nargs="?", default="list",
+                        help="functions: what a formula may use; try: test a formula "
+                             "on your data; add: keep one")
+    derive.add_argument("name", nargs="?", help="a column name (add), a formula (try), "
+                                                "or a word to search (functions)")
+    derive.add_argument("formula_text", nargs="?", metavar="formula",
+                        help="the formula, for `add`")
+    derive.add_argument("--on", help="which entity the column belongs to")
+    derive.add_argument("--explain", help="one sentence saying what the column means")
+    derive.add_argument("--round", type=int, help="digits to round to")
+    derive.add_argument("--unit", help="the unit of the result")
+    derive.add_argument("--review", action="store_true",
+                        help="hold results in the review queue until approved")
+    derive.add_argument("--samples", type=int, default=5, help="records to show")
     derive.add_argument("--formula")
     derive.add_argument("-f", "--file")
     derive.set_defaults(func=cmd_derive)
@@ -1872,7 +2089,9 @@ def main(argv=None) -> int:
         parser.print_help()
         return EXIT_OK
     try:
-        if args.command not in ("init", "settings"):
+        needs_project = not (args.command in ("init", "settings") or (
+            args.command == "derive" and args.action == "functions"))
+        if needs_project:
             root = project_root(args)
             from .extract.ai import load_dotenv
             load_dotenv(root)

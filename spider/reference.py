@@ -28,7 +28,7 @@ class Setting:
 SETTINGS: list[Setting] = [
     # ------------------------------------------------------------ the project
     Setting("project", "A short name for this dataset. It names the export files.",
-            "text", "spider-project", example="project: himalayan-plants"),
+            "text", "spider-project", example="project: chennai-places"),
     Setting("mode",
             "How tidy the output has to be. Project mode refuses anything below "
             "3NF so an app never gets a messy structure; analysis mode lets you "
@@ -152,6 +152,19 @@ SETTINGS: list[Setting] = [
             "list", "the first field",
             example="identity: [scientific_name]",
             note="Choose something stable: a scientific name, not a common one."),
+    Setting("entities.<name>.match",
+            "Whether two spellings of a name may be merged into one record. "
+            "`fuzzy` merges close variants of a name (Garwhal / Garhwal); "
+            "`exact` merges only identical ones. Identifiers are never fuzzy-"
+            "matched, and names that differ in a digit are never merged.",
+            "choice", "fuzzy", ("fuzzy", "exact"), example="match: exact",
+            note="Use exact when a wrong merge would cost more than a missed one."),
+    Setting("entities.<name>.label",
+            "The field a person would call a record by. `identity` decides two "
+            "pages are the same thing (a UPC, an id); `label` is what shows in "
+            "reports and what `spider explain` looks up.",
+            "text", "the identity value", example="label: title",
+            note="The identity value stays findable as an alias."),
     Setting("entities.<name>.fields",
             "The columns you want for this entity.", "map", "",
             example="fields:\n  altitude_m: {type: range, unit: m}"),
@@ -279,8 +292,19 @@ SETTINGS: list[Setting] = [
                  "mind and rebuild without crawling again."),
     Setting("standardize.dates", "The form dates are stored in.",
             "text", "iso8601", example="dates: iso8601"),
-    Setting("standardize.currency", "The currency amounts are converted to.",
-            "text", "INR", example="currency: INR"),
+    Setting("standardize.currency",
+            "The one currency to store every amount in. Leave it out and each "
+            "amount keeps the currency it was written in. A field's own `unit:` "
+            "(for example `unit: gbp`) overrides this for that field.",
+            "text", "none - amounts keep their own currency", example="currency: USD",
+            note="Converting between currencies needs `standardize.rates`."),
+    Setting("standardize.rates",
+            "What each currency is worth, on any one scale you choose, so amounts "
+            "can be converted. Spider has no exchange rates of its own and will "
+            "not invent one: with no rate, a mismatch is rejected with the reason.",
+            "map of currency to number", "{}",
+            example="rates: {USD: 1.0, GBP: 1.27, INR: 0.012}",
+            note="Use the rate for the date your data is about."),
     Setting("standardize.on_conflict",
             "What to do when sources still disagree after cleaning: take the value "
             "most sources give, trust your ranked list, take the newest, or keep "

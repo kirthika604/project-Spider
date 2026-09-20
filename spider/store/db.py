@@ -74,7 +74,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-FTS_VERSION = "4"
+FTS_VERSION = "5"
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -88,6 +88,16 @@ def migrate(conn: sqlite3.Connection) -> None:
     if get_meta(conn, "fts_version") == FTS_VERSION:
         conn.commit()
         return
+    # indexes a project made by an earlier version does not have: without
+    # them a build is quadratic in the number of pages
+    for statement in (
+            "CREATE INDEX IF NOT EXISTS idx_fields_page ON fields(page_id)",
+            "CREATE INDEX IF NOT EXISTS idx_structured_page ON structured(page_id)",
+            "CREATE INDEX IF NOT EXISTS idx_attr_source ON attributes(source_page)",
+            "CREATE INDEX IF NOT EXISTS idx_attr_name ON attributes(name, status)",
+            "CREATE INDEX IF NOT EXISTS idx_relations_to ON relations(to_entity)",
+            "CREATE INDEX IF NOT EXISTS idx_pages_source ON pages(source_id)"):
+        conn.execute(statement)
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(pages)")}
     if "summary" not in columns:
         conn.execute("ALTER TABLE pages ADD COLUMN summary TEXT")

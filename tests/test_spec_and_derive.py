@@ -82,7 +82,9 @@ def test_the_allowed_functions_work():
               "flowering_month": "July"}
     assert evaluate("band(altitude_m.min, [1500, 3000], ['low','mid','alpine'])",
                     values) == "alpine"
-    assert evaluate("season_of(flowering_month)", values) == "monsoon"
+    assert evaluate("season_of(flowering_month, 'india')", values) == "monsoon"
+    # with no calendar named, July is not assumed to be a monsoon
+    assert evaluate("season_of(flowering_month)", values) == "summer"
     assert evaluate("midpoint(altitude_m.min, altitude_m.max)", values) == 3750
     assert evaluate("convert(altitude_m.min, 'm', 'ft')", values) == 9842.52
     assert evaluate("if(altitude_m.min > 3500, 'rare', 'common')", values) == "common"

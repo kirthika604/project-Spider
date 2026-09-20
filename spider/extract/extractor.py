@@ -32,6 +32,7 @@ class Candidate:
     source_id: str | None = None
     fetched_at: str = ""
     route: str = "rules"          # rules | vocabulary | ai | file | connector
+    dom_evidence: bool = False    # read from the page's own markup by a selector
     origin: str = "extracted"
     rejected: str = ""            # reason, when the verification chain drops it
     # filled in later by the standardizer
@@ -77,18 +78,36 @@ def sentences(text: str) -> list[str]:
     return [s.strip() for s in SENTENCE_SPLIT.split(text or "") if s.strip()]
 
 
+_TERMINATORS = (". ", "! ", "? ", "\u0964 ", "\n")
+
+
 def sentence_with(text: str, value: str) -> str:
-    """The sentence on the page that states this value - its evidence quote."""
-    if not value:
+    """The sentence on the page that states this value - its evidence quote.
+
+    The value is found first and the sentence grown outwards from it. Splitting
+    the page into sentences and then searching them cannot work for a value
+    that contains a full stop - "St. Mary's Cafe", "3.5 km", "Dr. Rao" - because
+    the split cuts straight through it.
+    """
+    target = names.normalise(value)
+    if not target:
         return ""
-    target = names.normalise(value).lower()
-    numbers = re.findall(r"\d[\d,.]*", target)
-    for sentence in sentences(text):
-        low = sentence.lower()
-        if target and target in low:
-            return sentence[:400]
-        if numbers and all(n in low for n in numbers) and len(numbers) > 0:
-            return sentence[:400]
+    low, needle = text.lower(), target.lower()
+    position = low.find(needle)
+    if position >= 0:
+        end_of_value = position + len(needle)
+        start = max((low.rfind(t, 0, position) + len(t) for t in _TERMINATORS
+                     if low.rfind(t, 0, position) >= 0), default=0)
+        stops = [low.find(t, end_of_value) for t in _TERMINATORS]
+        stops = [s for s in stops if s >= 0]
+        end = min(stops) + 1 if stops else len(text)
+        return text[start:end].strip()[:400]
+    numbers = re.findall(r"\d[\d,.]*", needle)
+    if numbers:
+        for sentence in sentences(text):
+            lowered = sentence.lower()
+            if all(n in lowered for n in numbers):
+                return sentence[:400]
     return ""
 
 
@@ -99,7 +118,8 @@ class PageExtractor:
         self.conn = conn
         self.spec = spec
         self.ai = ai
-        self.rejected: list[tuple[str, str, str]] = []   # (url, what, reason)
+        self.rejected: list[tuple[str, str, str]] = []   # a few examples
+        self.reject_counts: dict = {}                    # every one, by kind
         self.stats = {"rules": 0, "vocabulary": 0, "ai": 0, "rejected": 0}
 
     # ------------------------------------------------------------------ run
@@ -117,6 +137,13 @@ class PageExtractor:
         # subject.
         primary_values = (self._from_rules(page_row, primary_type, identity,
                                            stored_fields, text) if identity else [])
+        # `required` means a record is incomplete without the value. A page
+        # that lacks one is not a page about this entity at all - it is a
+        # listing, an index or a search result - so it yields no record. This
+        # is what lets one crawl walk a site's list pages to reach its detail
+        # pages without inventing a record from every list.
+        if primary_values and not self._has_required(primary_type, primary_values):
+            primary_values = []
         candidates: list[Candidate] = list(primary_values)
         relations: list[RelationCandidate] = []
         subject = identity if primary_values else ""
@@ -135,6 +162,30 @@ class PageExtractor:
         return verified, relations, aliases
 
     # -------------------------------------------------------------- helpers
+    def _tier(self, page_row) -> int:
+        """How much this page's site is trusted, as spider.yaml says *now*.
+
+        The tier is a judgement about a source, not a fact about a page, so it
+        is not read back from when the page was crawled. Changing
+        `trust_tiers` should take effect on the next build, not force a
+        re-crawl. Files and endpoints carry the tier you gave them.
+        """
+        url = str(page_row["url"] or "")
+        if page_row["source_id"] is None and url.startswith(("http://", "https://")):
+            return self.spec.tier_for(url)
+        return _tier_of(page_row)
+
+    def _has_required(self, entity_type: str, values) -> bool:
+        ent = self.spec.entities.get(entity_type)
+        if not ent:
+            return True
+        found = {c.field for c in values}
+        missing = [name for name, fld in ent.fields.items()
+                   if fld.required and name not in found]
+        if missing:
+            self.stats["skipped_incomplete"] = self.stats.get("skipped_incomplete", 0) + 1
+        return not missing
+
     def _primary_type(self) -> str:
         return next(iter(self.spec.entities), "")
 
@@ -183,11 +234,23 @@ class PageExtractor:
             if not values:
                 continue
             for value in (values if fld.multiple else values[:1]):
+                quote = sentence_with(text, value)
+                dom = False
+                if not quote:
+                    # Not a sentence on the page: an attribute (a rating held in
+                    # a class, a price in `content`), or text the cleaner drops.
+                    # A selector read it from the markup, so the selector is the
+                    # evidence - and it is shown as one, not passed off as prose.
+                    selector = next((r for r in fld.extract
+                                     if not str(r).startswith("regex:")), None)
+                    if selector and value in stored_fields.get(fname, []):
+                        quote = f"[{selector}] {value}"
+                        dom = True
                 out.append(Candidate(
                     entity_type=entity_type, identity=identity, field=fname,
-                    raw_value=value, quote=sentence_with(text, value),
+                    raw_value=value, quote=quote, dom_evidence=dom,
                     page_id=page_row["id"], url=page_row["url"],
-                    domain=page_row["domain"], tier=_tier_of(page_row),
+                    domain=page_row["domain"], tier=self._tier(page_row),
                     source_id=page_row["source_id"], fetched_at=page_row["fetched_at"],
                     route="rules"))
                 self.stats["rules"] += 1
@@ -213,7 +276,7 @@ class PageExtractor:
                         entity_type=ename, identity=term, field=fname,
                         raw_value=term, quote=quote, page_id=page_row["id"],
                         url=page_row["url"], domain=page_row["domain"],
-                        tier=_tier_of(page_row), source_id=page_row["source_id"],
+                        tier=self._tier(page_row), source_id=page_row["source_id"],
                         fetched_at=page_row["fetched_at"], route="vocabulary"))
                     self.stats["vocabulary"] += 1
                     if primary_identity:
@@ -270,7 +333,7 @@ class PageExtractor:
                         raw_value=str(single), quote=str(cell.get("quote") or ""),
                         unit=cell.get("unit"), page_id=page_row["id"],
                         url=page_row["url"], domain=page_row["domain"],
-                        tier=_tier_of(page_row), source_id=page_row["source_id"],
+                        tier=self._tier(page_row), source_id=page_row["source_id"],
                         fetched_at=page_row["fetched_at"], route="ai"))
                     self.stats["ai"] += 1
         for rel in data.get("relations") or []:
@@ -337,7 +400,15 @@ class PageExtractor:
         return out
 
     def _verify(self, candidate: Candidate, text: str) -> Candidate | None:
-        """Quote proof (section 12, step 3). No quote, no value."""
+        """Quote proof (section 12, step 3). No quote, no value.
+
+        The proof exists to stop a model inventing a value, so it is applied to
+        anything a model or a loose text match produced. A value a CSS selector
+        read straight out of the page's markup is deterministic and carries its
+        selector as evidence instead.
+        """
+        if candidate.dom_evidence and candidate.route == "rules":
+            return candidate
         kept, reason = proof.check(candidate.raw_value, candidate.quote, text)
         if kept:
             return candidate
@@ -351,7 +422,11 @@ class PageExtractor:
                     candidate.quote = fallback
                     return candidate
         candidate.rejected = reason
-        self.rejected.append((candidate.url, f"{candidate.entity_type}.{candidate.field}"
-                              f" = {candidate.raw_value[:40]}", reason))
+        what = f"{candidate.entity_type}.{candidate.field}"
+        key = (what, reason[:70])
+        self.reject_counts[key] = self.reject_counts.get(key, 0) + 1
+        if len(self.rejected) < 500:
+            self.rejected.append((candidate.url, f"{what} = {candidate.raw_value[:40]}",
+                                  reason))
         self.stats["rejected"] += 1
         return None

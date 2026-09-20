@@ -169,35 +169,56 @@ def _as_aggregate(conn, spec, entity_type, field_name, total):
 
 
 # --------------------------------------------- 3. mapping in the reference
+def _places_that_match(conn, entity_type: str, field_name: str) -> int:
+    """How many stored values of this field are names the places reference knows
+    and can name a parent for."""
+    from ..ref.tables import place
+    rows = conn.execute(
+        "SELECT DISTINCT a.value FROM attributes a JOIN entities e "
+        "ON e.id = a.entity_id WHERE e.type=? AND a.name=? AND a.status='accepted' "
+        "LIMIT 40", (entity_type, field_name)).fetchall()
+    matched = 0
+    for row in rows:
+        found = place(conn, row["value"])
+        if found is not None and found["parent"]:
+            matched += 1
+    return matched
+
+
 def _as_reference(conn, spec, entity_type, field_name, fld, filled):
-    """A district implies its state; a month implies its season."""
-    if field_name in ("state", "parent", "region_state"):
-        for other in ("name", "district", "region"):
-            if filled.get(other):
+    """Only what the project's own reference tables can actually answer.
+
+    A suggestion is a claim. This used to offer a fixed set of altitude bands
+    ("subtropical", "temperate", "alpine") to anything called a zone, which is
+    true of one mountain range and wrong everywhere else, so it now offers only
+    a lookup that a reference table the user loaded can back up.
+    """
+    lowered = field_name.lower()
+
+    # a district implies its state - but only if the places reference has them
+    if lowered in ("state", "parent", "region_state", "province", "country"):
+        for other in ("name", "district", "region", "city", "place"):
+            if filled.get(other) and _places_that_match(conn, entity_type, other):
                 return Suggestion(
                     name=field_name, on=entity_type, method="lookup",
                     formula=f"place_parent({other})", inputs=[other], safe=True,
-                    explain=f"the state that {other} belongs to, from the places reference")
-    if "season" in field_name.lower():
+                    explain=(f"what {other} belongs to, from the places reference "
+                             f"you loaded"))
+
+    # a month implies its season - under the calendar the project names
+    if "season" in lowered:
         for other, count in filled.items():
             other_spec = spec.entity_field(entity_type, other)
             if count and other_spec and other_spec.type == "month":
+                explicit = "season_scheme" in (spec.raw or {})
+                note = (f"the season of {other}, using the '{spec.season_scheme}' "
+                        f"calendar" + ("" if explicit else
+                                       " (the default - set `season_scheme:` if "
+                                       "your subject follows another)"))
                 return Suggestion(
                     name=field_name, on=entity_type, method="lookup",
-                    formula=f"season_of({other})", inputs=[other], safe=True,
-                    explain=f"the season of {other}")
-    if "zone" in field_name.lower() or "band" in field_name.lower():
-        for other, count in filled.items():
-            other_spec = spec.entity_field(entity_type, other)
-            if count and other_spec and other_spec.type in ("range", "number") \
-                    and other_spec.unit in ("m", "ft"):
-                return Suggestion(
-                    name=field_name, on=entity_type, method="lookup",
-                    formula="", inputs=[f"{other}.min"],
-                    bands={"cutoffs": [1500, 3000],
-                           "labels": ["subtropical", "temperate", "alpine"]},
-                    safe=True,
-                    explain=f"a zone read from {other} using altitude bands")
+                    formula=f"season_of({other})", inputs=[other],
+                    safe=explicit, explain=note)
     return None
 
 
@@ -317,6 +338,13 @@ def _samples(conn, spec, suggestion: Suggestion) -> list[str]:
 
 
 def save(conn, suggestions: list[Suggestion]) -> int:
+    """Replace the open suggestions with the ones that are true now.
+
+    Approved and rejected derivations are decisions and stay. A suggestion that
+    was open but is no longer offered - the data or the rules changed - must
+    go, or the list slowly fills with claims nobody would make any more.
+    """
+    conn.execute("DELETE FROM derivations WHERE status='suggested'")
     conn.execute("DELETE FROM review_queue WHERE kind='suggestion' AND status='open'")
     for suggestion in suggestions:
         conn.execute(

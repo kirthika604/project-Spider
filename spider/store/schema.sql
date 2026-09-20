@@ -56,12 +56,16 @@ CREATE TABLE IF NOT EXISTS fields (
   value   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_fields_name ON fields(name);
+-- Looked up once per page while building. Without these each lookup scans the
+-- whole table, so a build is quadratic in the number of pages.
+CREATE INDEX IF NOT EXISTS idx_fields_page ON fields(page_id);
 
 CREATE TABLE IF NOT EXISTS structured (
   page_id INTEGER REFERENCES pages(id),
   type    TEXT,
   data    TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_structured_page ON structured(page_id);
 
 -- not an external-content table: FTS5 keeps its own copy so snippet() can
 -- return highlighted text (FR-9)
@@ -114,6 +118,8 @@ CREATE TABLE IF NOT EXISTS attributes (
 );
 CREATE INDEX IF NOT EXISTS idx_attr_entity ON attributes(entity_id, name);
 CREATE INDEX IF NOT EXISTS idx_attr_status ON attributes(status);
+CREATE INDEX IF NOT EXISTS idx_attr_source ON attributes(source_page);
+CREATE INDEX IF NOT EXISTS idx_attr_name ON attributes(name, status);
 
 CREATE TABLE IF NOT EXISTS relations (
   id          INTEGER PRIMARY KEY,
@@ -126,6 +132,9 @@ CREATE TABLE IF NOT EXISTS relations (
   created_at  TEXT,
   UNIQUE (from_entity, relation, to_entity, source_page)
 );
+
+CREATE INDEX IF NOT EXISTS idx_relations_to ON relations(to_entity);
+CREATE INDEX IF NOT EXISTS idx_pages_source ON pages(source_id);
 
 CREATE TABLE IF NOT EXISTS derivations (
   name         TEXT,

@@ -72,7 +72,8 @@ def main() -> None:
                 f"{spec.storage.normal_form}</div>",
                 unsafe_allow_html=True)
         screen = st.radio(
-            "Screen", ["Collect", "Review", "Dataset", "Schema and rules", "Search"],
+            "Screen", ["Collect", "Review", "Dataset", "Calculate",
+                       "Schema and rules", "Search"],
             label_visibility="collapsed")
         st.divider()
         left, right = st.columns(2)
@@ -87,7 +88,8 @@ def main() -> None:
         return
 
     {"Collect": screen_collect, "Review": screen_review, "Dataset": screen_dataset,
-     "Schema and rules": screen_schema, "Search": screen_search}[screen](conn, spec, root)
+     "Calculate": screen_calculate, "Schema and rules": screen_schema,
+     "Search": screen_search}[screen](conn, spec, root)
 
 
 # ------------------------------------------------------ screen 3: collect
@@ -387,6 +389,114 @@ def screen_dataset(conn, spec, root: Path) -> None:
                    "of": g["total"], "for example": ", ".join(g["examples"][:3])}
                   for g in open_gaps])
         st.caption("Run `spider fill` to search for these.")
+
+
+# ------------------------------------------------------------ calculate
+def screen_calculate(conn, spec, root: Path) -> None:
+    """Say how a column should be worked out, and see it run before keeping it."""
+    from spider.derive import catalogue
+    from spider.derive.add import add_derived
+    from spider.derive.preview import preview
+    from spider.standardize.units import format_number, parse_number
+
+    st.header("Calculate")
+    st.caption("Write how a new column is worked out from the ones you have. "
+               "Try it on your real records first; nothing is saved until you add it.")
+
+    entity = st.selectbox("For which records", list(spec.entities))
+    fields = list(spec.entities[entity].fields) + [
+        d.name for d in spec.derived.values() if d.on == entity]
+    st.markdown("Columns you can use: " + " ".join(
+        f"<span class='sp-chip sp-chip-extracted'>{f}</span>" for f in fields),
+        unsafe_allow_html=True)
+
+    if "formula" not in st.session_state:
+        st.session_state["formula"] = ""
+    formula = st.text_area(
+        "Formula", key="formula", height=90,
+        placeholder="price / total(price over book) * 100",
+        help="Arithmetic, brackets and the functions listed below.")
+
+    columns = st.columns([1, 1, 4])
+    tried = columns[0].button("Try it", type="primary")
+    if tried and formula.strip():
+        outcome = preview(conn, spec, entity, formula.strip())
+        st.session_state["last_try"] = (entity, formula.strip(), outcome)
+
+    last = st.session_state.get("last_try")
+    if last and last[0] == entity and last[1] == formula.strip():
+        outcome = last[2]
+        if outcome.syntax_error:
+            st.error(outcome.syntax_error)
+        elif outcome.unknown:
+            for name, close in outcome.unknown:
+                st.error(f"'{name}' is not a column of {entity}"
+                         + (f" - did you mean '{close}'?" if close else ""))
+        elif not outcome.scanned:
+            st.info("The formula is valid, but there are no records yet to try it "
+                    "on. Collect and build first.")
+        else:
+            (st.success if outcome.filled else st.warning)(
+                f"Tried on {outcome.scanned} record(s): {outcome.filled} filled, "
+                f"{outcome.empty} empty" + (f", {outcome.failed} failed" if outcome.failed else ""))
+            rows = []
+            for label, value, inputs in outcome.samples:
+                number = parse_number(value) if isinstance(value, (int, float)) else None
+                rows.append({"record": label,
+                             "result": format_number(number) if number is not None else value,
+                             **{k: v for k, v in inputs.items()}})
+            if rows:
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+            for error in outcome.errors:
+                st.error(error)
+            if outcome.empty and outcome.missing:
+                st.caption("Empty because those records lack: " + ", ".join(
+                    f"{k} ({v})" for k, v in sorted(outcome.missing.items(),
+                                                    key=lambda kv: -kv[1])[:3]))
+
+    st.subheader("Keep it")
+    left, right = st.columns(2)
+    name = left.text_input("Column name", placeholder="value_for_money")
+    explain = right.text_input("What it means (optional)")
+    more = st.columns(3)
+    digits = more[0].number_input("Round to (digits)", 0, 12, 2)
+    unit = more[1].text_input("Unit (optional)")
+    review = more[2].checkbox("Hold for review", help="Results wait in the review "
+                                                      "queue until you approve them")
+    if st.button("Add to spider.yaml"):
+        result = add_derived(spec, name, entity, formula, explain=explain or None,
+                             round_to=int(digits), unit=unit or None, review=review)
+        (st.success if result.ok else st.error)(result.message)
+        if result.ok:
+            st.info("Run a build (Collect screen) to calculate it for every record.")
+
+    st.divider()
+    st.subheader("What you can write")
+    search = st.text_input("Search the functions", placeholder="distance, average, date ...")
+    found = catalogue.find(search)
+    if not found:
+        st.caption("Nothing matches that.")
+    for group in catalogue.GROUPS:
+        members = [f for f in found if f.group == group]
+        if not members:
+            continue
+        with st.expander(f"{group}  ({len(members)})", expanded=bool(search)):
+            for item in members:
+                st.markdown(f"`{item.signature}` - {item.what}")
+                shown = item.example + (f"   ->   {item.result}" if item.result else "")
+                if item.given:
+                    shown += "   when " + ", ".join(
+                        f"{k} = {'empty' if v is None else v}" for k, v in item.given)
+                st.code(shown, language="text")
+
+    st.subheader("Common recipes")
+    for title, recipe in catalogue.COOKBOOK:
+        columns = st.columns([2, 4, 1])
+        columns[0].write(title)
+        columns[1].code(recipe, language="text")
+        if columns[2].button("Use", key=f"recipe-{title}"):
+            st.session_state["formula"] = recipe
+            st.rerun()
 
 
 # --------------------------------------------------- schema and rules tab

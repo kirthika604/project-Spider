@@ -93,6 +93,24 @@ def title_case(text: str) -> str:
     return " ".join(word.capitalize() for word in normalise(text).split())
 
 
+def similarity_of_keys(left: str, right: str) -> float:
+    """Similarity of two strings that are already comparison keys.
+
+    `similarity` recomputes the key - transliteration included - on every call,
+    which is most of what it costs when a record is compared against thousands.
+    """
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    try:
+        from rapidfuzz import fuzz
+        return max(fuzz.token_sort_ratio(left, right),
+                   fuzz.partial_ratio(left, right)) / 100.0
+    except ImportError:
+        return difflib.SequenceMatcher(None, left, right).ratio()
+
+
 def similarity(a: str, b: str) -> float:
     """0 to 1 similarity, using rapidfuzz when installed."""
     left, right = key(a), key(b)

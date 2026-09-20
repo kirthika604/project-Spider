@@ -71,6 +71,7 @@ derived:
     explain: "The season the plant flowers in"
 
 derive_policy: suggest                 # suggest | auto_safe | off
+season_scheme: india                   # northern | southern | india - this subject has a monsoon
 
 standardize:
   level: standard                      # raw | standard | strict, also settable per field

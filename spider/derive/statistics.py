@@ -11,59 +11,91 @@ derivation can say where this record sits in the dataset as a whole.
 
 from __future__ import annotations
 
+import bisect
 import math
 import statistics
 
 
-def column_values(conn, entity_type: str, field_name: str) -> list[float]:
-    """Every accepted number in one column, in record order."""
-    rows = conn.execute(
-        "SELECT a.value_num FROM attributes a JOIN entities e ON e.id = a.entity_id "
-        "WHERE e.type = ? AND a.name = ? AND a.status = 'accepted' "
-        "AND a.value_num IS NOT NULL ORDER BY a.entity_id",
-        (entity_type, field_name)).fetchall()
-    return [float(r["value_num"]) for r in rows]
+class Column:
+    """One column of one entity type, read from the database once.
+
+    A statistic over a column used to re-read the whole column for every row it
+    was asked about - 4,000 reads of 2,000 values to fill three columns. Now
+    the column is loaded once per derivation and every summary is memoised, so
+    the cost grows with the number of rows, not with its square.
+    """
+
+    def __init__(self, conn, entity_type: str, field_name: str):
+        rows = conn.execute(
+            "SELECT a.entity_id, a.value_num FROM attributes a "
+            "JOIN entities e ON e.id = a.entity_id "
+            "WHERE e.type = ? AND a.name = ? AND a.status = 'accepted' "
+            "AND a.value_num IS NOT NULL ORDER BY a.entity_id, a.confidence DESC",
+            (entity_type, field_name)).fetchall()
+        self.values = [float(r["value_num"]) for r in rows]
+        self.by_entity: dict = {}
+        for row in rows:                       # the most confident value per record
+            self.by_entity.setdefault(row["entity_id"], float(row["value_num"]))
+        self._memo: dict = {}
+
+    def memo(self, key, compute):
+        if key not in self._memo:
+            self._memo[key] = compute()
+        return self._memo[key]
+
+    @property
+    def ordered(self) -> list:
+        return self.memo("ordered", lambda: sorted(self.values))
 
 
-def column_texts(conn, entity_type: str, field_name: str) -> list[str]:
-    rows = conn.execute(
-        "SELECT a.value FROM attributes a JOIN entities e ON e.id = a.entity_id "
-        "WHERE e.type = ? AND a.name = ? AND a.status = 'accepted' "
-        "AND a.value IS NOT NULL", (entity_type, field_name)).fetchall()
-    return [str(r["value"]) for r in rows]
+class Columns:
+    """The columns a derivation has asked about so far."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self._columns: dict = {}
+
+    def get(self, entity_type: str, field_name: str) -> Column:
+        key = (str(entity_type), str(field_name))
+        if key not in self._columns:
+            self._columns[key] = Column(self.conn, *key)
+        return self._columns[key]
+
+    def texts(self, entity_type: str, field_name: str) -> list:
+        key = ("texts", str(entity_type), str(field_name))
+        if key not in self._columns:
+            rows = self.conn.execute(
+                "SELECT a.value FROM attributes a JOIN entities e ON e.id = a.entity_id "
+                "WHERE e.type = ? AND a.name = ? AND a.status = 'accepted' "
+                "AND a.value IS NOT NULL", (str(entity_type), str(field_name))).fetchall()
+            self._columns[key] = [str(r["value"]) for r in rows]
+        return self._columns[key]
 
 
-def this_value(conn, entity_id: int, field_name: str):
-    row = conn.execute(
-        "SELECT value_num FROM attributes WHERE entity_id = ? AND name = ? "
-        "AND status = 'accepted' AND value_num IS NOT NULL "
-        "ORDER BY confidence DESC LIMIT 1", (entity_id, field_name)).fetchone()
-    return float(row["value_num"]) if row else None
-
-
-def build(conn, entity_id: int) -> dict:
+def build(conn, entity_id: int, columns: Columns | None = None) -> dict:
     """The statistics functions, bound to this record and this project."""
+    columns = columns or Columns(conn)
 
-    def numbers(field_name, entity_type):
-        return column_values(conn, str(entity_type), str(field_name))
+    def col(field_name, entity_type) -> Column:
+        return columns.get(entity_type, field_name)
 
-    def _guard(values, least: int = 1):
-        return values if len(values) >= least else None
-
-    def stat(function, least=1):
+    def summary(name, function, least=1):
         def run(field_name, entity_type, *extra):
-            values = _guard(numbers(field_name, entity_type), least)
-            if values is None:
+            column = col(field_name, entity_type)
+            if len(column.values) < least:
                 return None
-            try:
-                return round(float(function(values, *extra)), 6)
-            except (statistics.StatisticsError, ValueError, ZeroDivisionError):
-                return None
+
+            def compute():
+                try:
+                    return round(float(function(column.values, *extra)), 6)
+                except (statistics.StatisticsError, ValueError, ZeroDivisionError):
+                    return None
+            return column.memo((name, extra), compute)
         return run
 
     def percentile(field_name, entity_type, which=50):
         """The value below which that percentage of records fall."""
-        values = sorted(numbers(field_name, entity_type))
+        values = col(field_name, entity_type).ordered
         if not values:
             return None
         share = max(0.0, min(100.0, float(which))) / 100
@@ -76,50 +108,47 @@ def build(conn, entity_id: int) -> dict:
 
     def zscore(field_name, entity_type):
         """How many standard deviations this record sits from the mean."""
-        values = numbers(field_name, entity_type)
-        mine = this_value(conn, entity_id, str(field_name))
-        if mine is None or len(values) < 2:
+        column = col(field_name, entity_type)
+        mine = column.by_entity.get(entity_id)
+        if mine is None or len(column.values) < 2:
             return None
-        spread = statistics.pstdev(values)
-        if not spread:
-            return 0.0
-        return round((mine - statistics.fmean(values)) / spread, 4)
+        mean = column.memo("mean", lambda: statistics.fmean(column.values))
+        spread = column.memo("pstdev", lambda: statistics.pstdev(column.values))
+        return 0.0 if not spread else round((mine - mean) / spread, 4)
 
     def normalize(field_name, entity_type):
         """Where this record falls between the smallest and largest, 0 to 1."""
-        values = numbers(field_name, entity_type)
-        mine = this_value(conn, entity_id, str(field_name))
-        if mine is None or not values:
+        column = col(field_name, entity_type)
+        mine = column.by_entity.get(entity_id)
+        if mine is None or not column.values:
             return None
-        low, high = min(values), max(values)
-        if high == low:
-            return 0.0
-        return round((mine - low) / (high - low), 4)
+        low, high = column.ordered[0], column.ordered[-1]
+        return 0.0 if high == low else round((mine - low) / (high - low), 4)
 
     def rank(field_name, entity_type, order="desc"):
         """This record's place in the column, 1 being the largest."""
-        values = sorted(numbers(field_name, entity_type),
-                        reverse=str(order).lower() != "asc")
-        mine = this_value(conn, entity_id, str(field_name))
-        if mine is None or not values:
+        column = col(field_name, entity_type)
+        mine = column.by_entity.get(entity_id)
+        if mine is None or not column.values:
             return None
-        return values.index(mine) + 1 if mine in values else None
+        ordered = column.ordered
+        if str(order).lower() == "asc":
+            return bisect.bisect_left(ordered, mine) + 1
+        return len(ordered) - bisect.bisect_right(ordered, mine) + 1
 
     def share(field_name, entity_type):
         """This record's value as a fraction of the column's total."""
-        values = numbers(field_name, entity_type)
-        mine = this_value(conn, entity_id, str(field_name))
-        total = sum(values)
-        if mine is None or not total:
-            return None
-        return round(mine / total, 6)
+        column = col(field_name, entity_type)
+        mine = column.by_entity.get(entity_id)
+        total = column.memo("total", lambda: sum(column.values))
+        return None if mine is None or not total else round(mine / total, 6)
 
     def count_distinct(field_name, entity_type):
-        return len({v.strip().lower()
-                    for v in column_texts(conn, str(entity_type), str(field_name))})
+        texts = columns.texts(entity_type, field_name)
+        return len({v.strip().lower() for v in texts})
 
     def mode(field_name, entity_type):
-        texts = column_texts(conn, str(entity_type), str(field_name))
+        texts = columns.texts(entity_type, field_name)
         if not texts:
             return None
         try:
@@ -130,35 +159,33 @@ def build(conn, entity_id: int) -> dict:
     def correlation(first, entity_type, second, second_entity=None):
         """How strongly two columns move together, -1 to 1.
 
-        Written `correlation(mass_kg over planet, radius_m over planet)`, so
-        both field names arrive as names rather than as one record's value.
+        Written `correlation(a over e, b over e)`, so both field names arrive
+        as names rather than as one record's value.
         """
         del second_entity
-        rows = conn.execute(
-            "SELECT a.entity_id, a.name, a.value_num FROM attributes a "
-            "JOIN entities e ON e.id = a.entity_id WHERE e.type = ? "
-            "AND a.name IN (?, ?) AND a.status = 'accepted' "
-            "AND a.value_num IS NOT NULL", (str(entity_type), str(first),
-                                            str(second))).fetchall()
-        paired: dict = {}
-        for row in rows:
-            paired.setdefault(row["entity_id"], {})[row["name"]] = row["value_num"]
-        xs = [v[str(first)] for v in paired.values()
-              if str(first) in v and str(second) in v]
-        ys = [v[str(second)] for v in paired.values()
-              if str(first) in v and str(second) in v]
-        if len(xs) < 2:
-            return None
-        try:
-            return round(statistics.correlation(xs, ys), 4)
-        except (statistics.StatisticsError, ValueError, ZeroDivisionError):
-            return None
+        left, right = col(first, entity_type), col(second, entity_type)
+
+        def compute():
+            shared = [k for k in left.by_entity if k in right.by_entity]
+            if len(shared) < 2:
+                return None
+            try:
+                return round(statistics.correlation(
+                    [left.by_entity[k] for k in shared],
+                    [right.by_entity[k] for k in shared]), 4)
+            except (statistics.StatisticsError, ValueError, ZeroDivisionError):
+                return None
+        return left.memo(("correlation", str(second)), compute)
 
     return {
-        "mean": stat(statistics.fmean), "median": stat(statistics.median),
-        "stdev": stat(statistics.pstdev, 2), "variance": stat(statistics.pvariance, 2),
-        "total": stat(sum), "spread": stat(lambda v: max(v) - min(v)),
-        "smallest": stat(min), "largest": stat(max), "records": stat(len),
+        "mean": summary("mean", statistics.fmean),
+        "median": summary("median", statistics.median),
+        "stdev": summary("stdev", statistics.pstdev, 2),
+        "variance": summary("variance", statistics.pvariance, 2),
+        "total": summary("total", sum),
+        "spread": summary("spread", lambda v: max(v) - min(v)),
+        "smallest": summary("smallest", min), "largest": summary("largest", max),
+        "records": summary("records", len),
         "percentile": percentile, "zscore": zscore, "normalize": normalize,
         "rank": rank, "share": share, "count_distinct": count_distinct,
         "mode": mode, "correlation": correlation,

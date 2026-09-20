@@ -11,7 +11,7 @@ rm -rf "$work" && mkdir -p "$work" && cd "$work"
 cp "$here/spider.yaml" "$here/gold.csv" "$here/field_survey_2025.xlsx" .
 
 step "1. One command per project, like git"
-spider init
+spider init --preset himalayan-plants   # this example's places and categories
 
 step "2. The project file says what dataset you want"
 spider check

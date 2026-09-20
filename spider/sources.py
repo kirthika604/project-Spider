@@ -45,6 +45,8 @@ def read_source(conn, spec, item, root: Path) -> SourceTest:
     register(conn, item)
     if item.type == "api":
         return _read_api(conn, spec, item)
+    if item.type == "osm":
+        return _read_osm(conn, spec, item)
     if item.type == "feed":
         return _read_feed(conn, spec, item)
     path = Path(item.location)
@@ -73,7 +75,43 @@ def _crawl_row(conn, item) -> int:
     return cursor.lastrowid
 
 
-def _save(conn, item, crawl_id, url, title, text, fields, tier=None) -> int:
+# Full-text search over the rows of a big file is a rarely wanted luxury that
+# costs more than everything else about reading it, so it is kept for files
+# small enough that someone might actually search them.
+SEARCH_INDEX_ROW_LIMIT = 5000
+COMMIT_EVERY = 2000
+
+
+class _Rows:
+    """Bookkeeping for reading a file of many rows in one transaction.
+
+    Reading used to commit and update the search index after every row: 52
+    seconds for 20,000 rows, so 43 minutes for a million just to read a file.
+    """
+
+    def __init__(self, total: int):
+        self.index_for_search = total <= SEARCH_INDEX_ROW_LIMIT
+        self.saved = 0
+
+    def after_row(self, conn) -> None:
+        self.saved += 1
+        if self.saved % COMMIT_EVERY == 0:
+            conn.commit()
+
+    def finish(self, conn, item) -> None:
+        conn.execute("UPDATE sources SET pages_read = pages_read + ? WHERE id=?",
+                     (self.saved, item.id))
+        conn.commit()
+
+
+def _count_rows(path: Path) -> int:
+    """Data rows in a text file, counted without loading it."""
+    with open(path, "rb") as handle:
+        return max(0, sum(1 for _ in handle) - 1)
+
+
+def _save(conn, item, crawl_id, url, title, text, fields, tier=None,
+          rows: "_Rows | None" = None) -> int:
     """Store a file the same way a page is stored, so evidence works alike."""
     page = ParsedPage(url=url, title=title, text=text)
     row = conn.execute("SELECT id FROM pages WHERE url=?", (url,)).fetchone()
@@ -97,10 +135,15 @@ def _save(conn, item, crawl_id, url, title, text, fields, tier=None) -> int:
             values).lastrowid
     conn.executemany("INSERT INTO fields(page_id,name,value) VALUES(?,?,?)",
                      [(page_id, n, v) for n, v in fields])
-    conn.execute("INSERT INTO pages_fts(rowid,title,description,headings,text) "
-                 "VALUES(?,?,?,?,?)", (page_id, title, "", "", text))
-    conn.execute("UPDATE sources SET pages_read = pages_read + 1 WHERE id=?", (item.id,))
-    conn.commit()
+    if rows is None or rows.index_for_search:
+        conn.execute("INSERT INTO pages_fts(rowid,title,description,headings,text) "
+                     "VALUES(?,?,?,?,?)", (page_id, title, "", "", text))
+    if rows is None:                       # a lone file: commit as before
+        conn.execute("UPDATE sources SET pages_read = pages_read + 1 WHERE id=?",
+                     (item.id,))
+        conn.commit()
+    else:
+        rows.after_row(conn)
     return page_id
 
 
@@ -127,32 +170,36 @@ def _column_map(item, spec, header: list[str]) -> dict[str, str]:
 
 def _read_csv(conn, spec, item, path: Path) -> SourceTest:
     delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
-    with open(path, newline="", encoding="utf-8-sig") as handle:
-        rows = list(csv.DictReader(handle, delimiter=delimiter))
-        header = list(rows[0].keys()) if rows else []
-    mapping = _column_map(item, spec, header)
+    identity = list(spec.entities.values())[0].identity or []
     crawl_id = _crawl_row(conn, item)
-    saved = 0
-    for index, row in enumerate(rows, start=2):        # row 1 is the header
-        fields = [(field_name, normalise(row.get(column)))
-                  for column, field_name in mapping.items()
-                  if normalise(row.get(column))]
-        if not fields:
-            continue
-        lines = [f"{column}: {row.get(column)}" for column in header
-                 if normalise(row.get(column))]
-        text = f"Row {index} of {path.name}. " + ". ".join(lines) + "."
-        title = next((normalise(row.get(c)) for c, f in mapping.items()
-                      if f in (list(spec.entities.values())[0].identity or [])), "") \
-            or f"{path.name} row {index}"
-        url = f"file://{path.resolve()}#row={index}"
-        _save(conn, item, crawl_id, url, title, text, fields)
-        saved += 1
+    batch = _Rows(_count_rows(path))
+    resolved = path.resolve()
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle, delimiter=delimiter)   # streamed, not loaded
+        header = [h for h in (reader.fieldnames or []) if h]
+        mapping = _column_map(item, spec, header)
+        title_column = next((c for c, f in mapping.items() if f in identity), None)
+        for index, row in enumerate(reader, start=2):          # row 1 is the header
+            fields = []
+            for column, field_name in mapping.items():
+                cleaned = normalise(row.get(column))
+                if cleaned:
+                    fields.append((field_name, cleaned))
+            if not fields:
+                continue
+            lines = [f"{column}: {row.get(column)}" for column in header
+                     if normalise(row.get(column))]
+            text = f"Row {index} of {path.name}. " + ". ".join(lines) + "."
+            title = (normalise(row.get(title_column)) if title_column else "") \
+                or f"{path.name} row {index}"
+            _save(conn, item, crawl_id, f"file://{resolved}#row={index}", title, text,
+                  fields, rows=batch)
+    batch.finish(conn, item)
     conn.execute("UPDATE sources SET values_given = values_given + ? WHERE id=?",
-                 (saved * max(1, len(mapping)), item.id))
+                 (batch.saved * max(1, len(mapping)), item.id))
     conn.commit()
-    return SourceTest(item.id, "csv", True, sorted(set(mapping.values())), saved,
-                      f"{saved} rows read from {path.name}")
+    return SourceTest(item.id, "csv", True, sorted(set(mapping.values())), batch.saved,
+                      f"{batch.saved} rows read from {path.name}")
 
 
 def _read_xlsx(conn, spec, item, path: Path) -> SourceTest:
@@ -381,6 +428,188 @@ def _read_api(conn, spec, item) -> SourceTest:
         saved += 1
     return SourceTest(item.id, "api", True, sorted(found), saved,
                       f"{saved} record(s) read from the endpoint")
+
+
+OVERPASS_MIRRORS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+)
+# overpass-api.de answers 406 to any User-Agent with text after the product
+# token, so this endpoint gets the bare token and nothing else.
+OVERPASS_AGENT = f"ProjectSpider/{__import__('spider').__version__}"
+DEFAULT_OSM_LIMIT = 20000
+
+
+def _osm_tag_filters(tags) -> list[str]:
+    """`{amenity: cafe}`, `["amenity=cafe", "shop"]` or `"amenity=cafe"` as
+    Overpass filters. A bare key means "has this tag, whatever its value"."""
+    if not tags:
+        return []
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    if isinstance(tags, dict):
+        pairs = [(str(k), None if v in (None, True, "*") else str(v))
+                 for k, v in tags.items()]
+    else:
+        pairs = []
+        for entry in tags:
+            key, _, value = str(entry).partition("=")
+            pairs.append((key.strip(), value.strip() or None))
+    out = []
+    for key, value in pairs:
+        safe_key = key.replace('"', "")
+        out.append(f'["{safe_key}"]' if value is None
+                   else f'["{safe_key}"="{value.replace(chr(34), "")}"]')
+    return out
+
+
+def _osm_bbox(conn, item) -> tuple:
+    """(south, west, north, east) from an explicit `bbox:` or by looking up `area:`."""
+    if item.bbox and len(item.bbox) == 4:
+        south, west, north, east = (float(v) for v in item.bbox)
+        return south, west, north, east, f"the box {item.bbox}"
+    if not item.area:
+        raise ValueError("an osm source needs `area:` (a place name) or `bbox:` "
+                         "(south, west, north, east)")
+    import requests
+
+    from . import USER_AGENT
+    from .store.db import jdump, jload
+    key = f"nominatim-area:{item.area.lower()}"
+    cached = conn.execute("SELECT response FROM ai_cache WHERE key=?", (key,)).fetchone()
+    found = jload(cached["response"]) if cached else None
+    if not found:
+        import time
+        time.sleep(1.1)                               # Nominatim: one request a second
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": item.area, "format": "json", "limit": 1},
+            headers={"User-Agent": USER_AGENT}, timeout=30)
+        found = response.json() if response.status_code == 200 else []
+        if found:
+            conn.execute("INSERT OR REPLACE INTO ai_cache(key,kind,response,created_at) "
+                         "VALUES(?,?,?,?)", (key, "osm-area", jdump(found), now()))
+            conn.commit()
+    if not found:
+        raise ValueError(f"OpenStreetMap does not know a place called '{item.area}' - "
+                         f"check the spelling, or give `bbox:` yourself")
+    south, north, west, east = (float(v) for v in found[0]["boundingbox"])
+    return south, west, north, east, found[0].get("display_name", item.area)
+
+
+def _overpass(query: str, conn) -> dict:
+    """Run a query, retrying and failing over between the public mirrors.
+
+    These are free shared servers that answer 429 and 504 when busy, so a
+    single attempt would fail for a real user on any given afternoon.
+    """
+    import time
+
+    import requests
+
+    from .store.db import jdump, jload
+    import hashlib
+    # not hash(): Python randomises it per process, so the cache would never hit
+    key = "overpass:" + hashlib.sha1(query.encode()).hexdigest()
+    cached = conn.execute("SELECT response FROM ai_cache WHERE key=?",
+                          (key,)).fetchone()
+    if cached:
+        return jload(cached["response"])
+    problems = []
+    for attempt in range(3):
+        for mirror in OVERPASS_MIRRORS:
+            try:
+                response = requests.post(mirror, data={"data": query},
+                                         headers={"User-Agent": OVERPASS_AGENT},
+                                         timeout=120)
+            except requests.RequestException as exc:
+                problems.append(f"{mirror.split('/')[2]}: {type(exc).__name__}")
+                continue
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                except ValueError:
+                    problems.append(f"{mirror.split('/')[2]}: not JSON")
+                    continue
+                if len(response.content) < 30_000_000:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO ai_cache(key,kind,response,created_at) "
+                        "VALUES(?,?,?,?)", (key, "overpass", jdump(data), now()))
+                    conn.commit()
+                return data
+            problems.append(f"{mirror.split('/')[2]}: HTTP {response.status_code}")
+        time.sleep(3 * (attempt + 1))
+    raise RuntimeError("no OpenStreetMap server answered (" +
+                       "; ".join(dict.fromkeys(problems))[:200] + "). They are free "
+                       "and shared: try again in a few minutes")
+
+
+def _read_osm(conn, spec, item) -> SourceTest:
+    """Places from OpenStreetMap: name an area and what you want in it.
+
+        - {id: cafes, type: osm, area: Chennai, tags: {amenity: cafe}}
+
+    Each feature becomes a record with its name, `latitude`, `longitude`,
+    `osm_id`, `osm_type` and every tag OpenStreetMap holds for it (`cuisine`,
+    `opening_hours`, `addr:street` ...), which `map:` can pick from.
+    """
+    try:
+        south, west, north, east, described = _osm_bbox(conn, item)
+    except Exception as exc:
+        return SourceTest(item.id, "osm", False, note=str(exc)[:200])
+    filters = _osm_tag_filters(item.tags)
+    if not filters:
+        return SourceTest(item.id, "osm", False,
+                          note="an osm source needs `tags:`, for example "
+                               "{amenity: cafe} - otherwise it would fetch everything")
+    limit = item.limit or DEFAULT_OSM_LIMIT
+    body = "".join(f"node{f};way{f};" for f in filters)
+    query = (f"[out:json][timeout:90][bbox:{south},{west},{north},{east}];"
+             f"({body});out center {limit};")
+    try:
+        data = _overpass(query, conn)
+    except RuntimeError as exc:
+        return SourceTest(item.id, "osm", False, note=str(exc))
+
+    elements = data.get("elements", [])
+    crawl_id = _crawl_row(conn, item)
+    batch = _Rows(len(elements))
+    found = set()
+    # The columns are every tag that appears on any feature: `cuisine` may first
+    # show up on the fiftieth cafe, and a mapping built from the first would
+    # never have looked for it.
+    seen_tags = set()
+    for element in elements:
+        seen_tags.update((element.get("tags") or {}))
+    seen_tags.discard("name")
+    mapping = _column_map(item, spec, ["name", "latitude", "longitude", "osm_id",
+                                       "osm_type", *sorted(seen_tags)])
+    for element in elements:
+        tags = element.get("tags") or {}
+        centre = element.get("center") or {}
+        lat = element.get("lat", centre.get("lat"))
+        lon = element.get("lon", centre.get("lon"))
+        if lat is None or lon is None:
+            continue
+        record = {"name": tags.get("name", ""), "latitude": lat, "longitude": lon,
+                  "osm_id": element.get("id"), "osm_type": element.get("type"),
+                  **{k: v for k, v in tags.items() if k != "name"}}
+        fields = [(field_name, normalise(record.get(column)))
+                  for column, field_name in mapping.items()
+                  if normalise(record.get(column))]
+        if not fields:
+            continue
+        found.update(f for f, _ in fields)
+        kind, osm_id = element.get("type", "node"), element.get("id")
+        url = f"https://www.openstreetmap.org/{kind}/{osm_id}"
+        shown = ", ".join(f"{k}: {v}" for k, v in record.items() if v not in (None, ""))
+        title = record["name"] or f"{kind} {osm_id}"
+        _save(conn, item, crawl_id, url, title,
+              f"OpenStreetMap {kind} {osm_id}. {shown}.", fields, rows=batch)
+    batch.finish(conn, item)
+    return SourceTest(item.id, "osm", True, sorted(found), batch.saved,
+                      f"{batch.saved} feature(s) with coordinates in {described[:60]}")
 
 
 def _flatten(record: dict, prefix: str = "") -> dict:

@@ -75,16 +75,38 @@ def to_month(text):
     return None
 
 
-def season_of(month) -> str | None:
-    """Indian seasons, used by the `season_of()` formula function."""
+SEASON_SCHEMES = {
+    # meteorological seasons, northern hemisphere: the default, because a tool
+    # for any subject must not assume one country's calendar
+    "northern": {12: "winter", 1: "winter", 2: "winter",
+                 3: "spring", 4: "spring", 5: "spring",
+                 6: "summer", 7: "summer", 8: "summer",
+                 9: "autumn", 10: "autumn", 11: "autumn"},
+    # the same four, six months apart
+    "southern": {12: "summer", 1: "summer", 2: "summer",
+                 3: "autumn", 4: "autumn", 5: "autumn",
+                 6: "winter", 7: "winter", 8: "winter",
+                 9: "spring", 10: "spring", 11: "spring"},
+    # the Indian calendar: six seasons, including the monsoon
+    "india": {12: "winter", 1: "winter", 2: "winter",
+              3: "spring", 4: "spring",
+              5: "summer", 6: "summer",
+              7: "monsoon", 8: "monsoon", 9: "monsoon",
+              10: "autumn", 11: "autumn"},
+}
+DEFAULT_SEASON_SCHEME = "northern"
+
+
+def season_of(month, scheme: str = DEFAULT_SEASON_SCHEME):
+    """The season a month falls in, under one of the named calendars."""
     number = to_month(month)
     if not number:
         return None
-    return {12: "winter", 1: "winter", 2: "winter",
-            3: "spring", 4: "spring",
-            5: "summer", 6: "summer",
-            7: "monsoon", 8: "monsoon", 9: "monsoon",
-            10: "autumn", 11: "autumn"}[number]
+    table = SEASON_SCHEMES.get(str(scheme or DEFAULT_SEASON_SCHEME).lower())
+    if table is None:
+        raise ValueError(f"unknown season scheme '{scheme}' - use one of "
+                         f"{', '.join(SEASON_SCHEMES)}")
+    return table[number]
 
 
 def year_of(text):

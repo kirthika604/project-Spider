@@ -8,6 +8,7 @@ eval() on the string.
 from __future__ import annotations
 
 import ast
+import functools
 import math
 import re
 
@@ -182,6 +183,105 @@ def f_clamp(value, low, high):
     return max(floor_value, min(ceiling, number))
 
 
+# ---- text, for values that arrive as prose ("In stock (22 available)") ----
+def _text(value):
+    return "" if value is None else str(value)
+
+
+def f_contains(value, needle):
+    if value is None:
+        return None
+    return _text(needle).lower() in _text(value).lower()
+
+
+def f_word(value, position=1):
+    """The nth word (1 is the first, -1 the last) of a text."""
+    words = _text(value).split()
+    try:
+        index = int(position)
+        index = index - 1 if index > 0 else index
+        return words[index]
+    except (IndexError, ValueError, TypeError):
+        return None
+
+
+def f_replace(value, old, new=""):
+    return None if value is None else _text(value).replace(_text(old), _text(new))
+
+
+def f_number(value):
+    """The number inside a text: "\u00a351.77" gives 51.77."""
+    return units.parse_number(value)
+
+
+def f_starts(value, prefix):
+    return None if value is None else _text(value).lower().startswith(_text(prefix).lower())
+
+
+def f_ends(value, suffix):
+    return None if value is None else _text(value).lower().endswith(_text(suffix).lower())
+
+
+# ---- dates, for ages and durations -----------------------------------------
+def _date(value):
+    from datetime import date
+    iso = dates.to_iso(value)
+    if not iso or len(iso) < 10:
+        return None
+    try:
+        return date(int(iso[:4]), int(iso[5:7]), int(iso[8:10]))
+    except ValueError:
+        return None
+
+
+def f_days_between(start, end):
+    """Whole days from one date to another (negative if `end` is earlier)."""
+    a, b = _date(start), _date(end)
+    return None if a is None or b is None else (b - a).days
+
+
+def f_years_between(start, end):
+    """Years from one date to another, as a decimal - an age, a tenure."""
+    days = f_days_between(start, end)
+    return None if days is None else round(days / 365.25, 2)
+
+
+def f_month_of(value):
+    return dates.to_month(value)
+
+
+def f_day_of(value):
+    found = _date(value)
+    return None if found is None else found.day
+
+
+def f_weekday_of(value):
+    found = _date(value)
+    return None if found is None else found.strftime("%A")
+
+
+# ---- fallbacks and cutting text ----------------------------------------------
+def f_coalesce(*args):
+    """The first value that is not empty."""
+    for value in args:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def f_is_empty(value):
+    return value is None or value == "" or value == []
+
+
+def f_substr(value, start=1, length=None):
+    """A piece of a text; `start` counts from 1, as in a spreadsheet."""
+    if value is None:
+        return None
+    text = _text(value)
+    begin = max(0, int(start) - 1)
+    return text[begin:] if length is None else text[begin:begin + int(length)]
+
+
 # Constants, so a formula can be written the way it is written on paper.
 CONSTANTS = {"pi": math.pi, "e": math.e, "tau": math.tau}
 
@@ -199,10 +299,17 @@ FUNCTIONS = {
     "band": f_band, "if": f_if, "if_": f_if, "convert": f_convert,
     "midpoint": f_midpoint,
     "season_of": dates.season_of, "year_of": dates.year_of, "concat": f_concat,
+    "place_parent": lambda name: None,      # bound by the engine to the project's places
     "round": lambda v, n=0: (None if units.parse_number(v) is None
                              else round(units.parse_number(v), int(n))),
     "abs": lambda v: (None if units.parse_number(v) is None else abs(units.parse_number(v))),
     "len": lambda v: (len(v) if v is not None else 0),
+    "days_between": f_days_between, "years_between": f_years_between,
+    "month_of": f_month_of, "day_of": f_day_of, "weekday_of": f_weekday_of,
+    "coalesce": f_coalesce, "is_empty": f_is_empty, "substr": f_substr,
+    "contains": f_contains, "word": f_word, "replace": f_replace, "number": f_number,
+    "startswith": f_starts, "endswith": f_ends,
+    "trim": lambda v: None if v is None else _text(v).strip(),
     "lower": lambda v: str(v).lower() if v is not None else None,
     "upper": lambda v: str(v).upper() if v is not None else None,
 }
@@ -232,39 +339,80 @@ def prepare(formula: str) -> str:
     return text
 
 
-def referenced_names(formula: str) -> list[str]:
+def suggest(name: str, known, cutoff: float = 0.55) -> str | None:
+    """The known name a misspelling most likely meant.
+
+    Similarity alone misses the commonest slip - a name with something added or
+    dropped: `alt_typo` for `alt`, `altitude` for `altitude_m` - so a name that
+    starts another counts as a match too.
+    """
+    import difflib
+    known = sorted(k for k in known if k)
+    close = difflib.get_close_matches(name, known, n=1, cutoff=cutoff)
+    if close:
+        return close[0]
+    for candidate in known:
+        if len(candidate) >= 3 and (name.startswith(candidate)
+                                    or candidate.startswith(name)):
+            return candidate
+    return None
+
+
+def called_names(formula: str) -> list[str]:
+    """Every name a formula calls as a function."""
     try:
         tree = ast.parse(prepare(formula), mode="eval")
     except SyntaxError:
         return []
+    return [n.func.id for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+
+
+def referenced_names(formula: str) -> list[str]:
+    """The fields a formula reads: names that are not calls and not constants."""
+    try:
+        tree = ast.parse(prepare(formula), mode="eval")
+    except SyntaxError:
+        return []
+    calls = {n.func.id for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     return sorted({node.id for node in ast.walk(tree)
-                   if isinstance(node, ast.Name) and node.id not in FUNCTIONS})
+                   if isinstance(node, ast.Name) and node.id not in FUNCTIONS
+                   and node.id not in calls and node.id not in CONSTANTS})
 
 
-def evaluate(formula: str, variables: dict, functions: dict | None = None):
-    """Evaluate a user formula against this entity's values."""
-    source = prepare(formula)
+@functools.lru_cache(maxsize=1024)
+def _compile(source: str):
+    """Parse and vet a formula once. It is then evaluated for every record, and
+    parsing it again for each of a million rows is most of what it costs."""
     try:
         tree = ast.parse(source, mode="eval")
     except SyntaxError as exc:
         raise FormulaError(f"cannot read the formula: {exc.msg}") from exc
-
-    table = dict(FUNCTIONS)
-    table.update(functions or {})
-
+    calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ALLOWED_NODES):
             raise FormulaError(
                 f"'{type(node).__name__}' is not allowed in a formula - "
-                f"use only arithmetic and {', '.join(sorted(table))}")
+                f"use only arithmetic and {', '.join(sorted(k for k in FUNCTIONS if k != 'if_'))}")
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name):
                 raise FormulaError(
                     "method and attribute calls are not allowed in a formula - "
-                    f"use only {', '.join(sorted(k for k in table if k != 'if_'))}")
-            if node.func.id not in table:
-                raise FormulaError(f"unknown function '{node.func.id}' - allowed: "
-                                   f"{', '.join(sorted(k for k in table if k != 'if_'))}")
+                    f"use only {', '.join(sorted(k for k in FUNCTIONS if k != 'if_'))}")
+            calls.append(node.func.id)
+    return tree, tuple(calls)
+
+
+def evaluate(formula: str, variables: dict, functions: dict | None = None):
+    """Evaluate a user formula against this entity's values."""
+    tree, calls = _compile(prepare(formula))
+    table = dict(FUNCTIONS)
+    table.update(functions or {})
+    for name in calls:
+        if name not in table:
+            raise FormulaError(f"unknown function '{name}' - allowed: "
+                               f"{', '.join(sorted(k for k in table if k != 'if_'))}")
 
     def walk(node):
         if isinstance(node, ast.Expression):

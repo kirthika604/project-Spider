@@ -6,7 +6,11 @@ value carries its source, its evidence quote and a confidence score.
 """
 
 __version__ = "0.1.0"
-USER_AGENT = (
-    "ProjectSpider/0.1 (+https://github.com/project-spider; "
-    "polite project-local crawler; contact: see spider.yaml)"
-)
+import os
+
+# How Spider introduces itself. It used to include a link to a repository that
+# does not exist - a made-up contact in every request. It now says only what is
+# true, and a project that wants a real contact adds one:
+#   SPIDER_USER_AGENT="ProjectSpider/0.1 (+mailto:you@example.org)"
+USER_AGENT = os.environ.get(
+    "SPIDER_USER_AGENT", f"ProjectSpider/{__version__} (polite project-local crawler)")

@@ -33,12 +33,17 @@ class DeriveReport:
     errors: list[str] = field(default_factory=list)
     queued_for_review: int = 0
     described: list[str] = field(default_factory=list)
+    # per derivation: how many records it filled, out of how many, and which
+    # inputs were missing on the ones it did not
+    detail: dict = field(default_factory=dict)
 
 
 class DeriveEngine:
     def __init__(self, conn, spec, root=None):
         self.conn = conn
         self.spec = spec
+        self._columns = None            # column statistics, fresh per derivation
+        self._prefetched = None         # every accepted value of the entity type
         self.root = Path(root) if root else (
             spec.path.parent if spec.path else Path.cwd())
 
@@ -96,9 +101,22 @@ class DeriveEngine:
         return order
 
     def _run_one(self, der, report: DeriveReport) -> None:
+        from .statistics import Columns
         entity_rows = self.conn.execute(
             "SELECT id, canonical_name FROM entities WHERE type=?", (der.on,)).fetchall()
-        for row in entity_rows:
+        # A derivation reads other columns, which earlier derivations may have
+        # just written, so both caches start empty for each one.
+        self._columns = Columns(self.conn)
+        self._prefetched = None
+        from collections import Counter
+        filled, missing_inputs = 0, Counter()
+        ordered = sorted(entity_rows, key=lambda r: r["id"])
+        for position, row in enumerate(ordered):
+            if position % self.CHUNK == 0:
+                # values for the next few thousand records, not every record's
+                self._prefetched = self._prefetch_range(
+                    ordered[position]["id"],
+                    ordered[min(position + self.CHUNK, len(ordered)) - 1]["id"])
             try:
                 result = self.calculate(der, row["id"])
             except FormulaError as exc:
@@ -106,15 +124,40 @@ class DeriveEngine:
                 continue
             if result is None:
                 report.skipped_missing += 1
+                missing_inputs.update(self._last_missing)
                 continue
             self._write(result, der)
             report.written += 1
+            filled += 1
             if result.needs_review:
                 report.queued_for_review += 1
+        self._columns = self._prefetched = None
+        report.detail[der.name] = (filled, len(entity_rows), dict(missing_inputs))
+
+    CHUNK = 5000
+
+    def _prefetch_range(self, first_id: int, last_id: int) -> dict:
+        """The accepted values of a run of records, in one query.
+
+        A query per record is 37 microseconds each; a query per chunk is
+        cheaper still. Reading the whole entity type at once is fastest but
+        holds every value in memory, so it is done a few thousand at a time.
+        """
+        by_entity: dict = {}
+        for row in self.conn.execute(
+                "SELECT entity_id, id, name, value, value_num, value_max, "
+                "confidence, tier, origin FROM attributes INDEXED BY idx_attr_entity "
+                "WHERE entity_id BETWEEN ? AND ? AND status = 'accepted'",
+                (first_id, last_id)):
+            by_entity.setdefault(row["entity_id"], []).append(row)
+        return by_entity
 
     # ------------------------------------------------------------ calculate
+    _last_missing: set = frozenset()
+
     def calculate(self, der, entity_id: int) -> DerivedValue | None:
         variables, sources, missing = self._variables(der, entity_id)
+        self._last_missing = missing
         if missing and der.if_missing == "leave_empty":
             return None
         if missing and der.if_missing == "use_fallback":
@@ -155,10 +198,13 @@ class DeriveEngine:
         """Bind this entity's values, plus `name.min` / `name.max` for ranges."""
         variables: dict[str, object] = {}
         sources: list[tuple[int, float]] = []
-        rows = self.conn.execute(
-            "SELECT id, name, value, value_num, value_max, confidence, tier, origin "
-            "FROM attributes WHERE entity_id=? AND status='accepted'",
-            (entity_id,)).fetchall()
+        if self._prefetched is not None:
+            rows = self._prefetched.get(entity_id, [])
+        else:
+            rows = self.conn.execute(
+                "SELECT id, name, value, value_num, value_max, confidence, tier, origin "
+                "FROM attributes WHERE entity_id=? AND status='accepted'",
+                (entity_id,)).fetchall()
         by_name: dict[str, list] = {}
         for row in rows:
             by_name.setdefault(row["name"], []).append(row)
@@ -234,9 +280,31 @@ class DeriveEngine:
                 f"SELECT SUM(value_num) s FROM attributes WHERE entity_id IN ({marks}) "
                 f"AND name=? AND status='accepted'", (*ids, field_name)).fetchone()
             return row["s"] or 0
+        from ..standardize.dates import season_of
+
+        def season(month, scheme=None):
+            """`season_of(m)` uses the project's calendar; `season_of(m, 'india')`
+            names one."""
+            try:
+                return season_of(month, scheme or self.spec.season_scheme)
+            except ValueError as exc:
+                raise FormulaError(str(exc)) from exc
+
+        def place_parent(name):
+            """The district's state, or the state's country: whatever the
+            places reference says contains this name."""
+            from ..ref.tables import place
+            row = place(self.conn, str(name)) if name is not None else None
+            if row is None or not row["parent"]:
+                return None
+            parent = self.conn.execute(
+                "SELECT name FROM ref_places WHERE code=?", (row["parent"],)).fetchone()
+            return parent["name"] if parent else None
+
         from .statistics import build as build_statistics
-        functions = {"count": count_related, "sum_related": sum_related}
-        functions.update(build_statistics(self.conn, entity_id))
+        functions = {"count": count_related, "sum_related": sum_related,
+                     "season_of": season, "place_parent": place_parent}
+        functions.update(build_statistics(self.conn, entity_id, self._columns))
         return functions
 
     # ---------------------------------------------------------------- write

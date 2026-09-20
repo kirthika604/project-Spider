@@ -79,10 +79,18 @@ def _accepted_ids(conn) -> set:
 
 
 def _values(conn, entity_id: int, include_derived=True, min_confidence=None):
-    query = ("SELECT name, value, value_num, value_max, unit, origin, confidence, "
-             "tier, source_page, evidence FROM attributes "
-             "WHERE entity_id=? AND status='accepted'")
-    rows = conn.execute(query, (entity_id,)).fetchall()
+    """One record's accepted values.
+
+    Pinning the index matters: with no statistics SQLite picks the low-selectivity
+    `status` index instead and scans every accepted value for every record,
+    which is quadratic (5 ms a record at 6,000 rows). Caching every value in
+    memory fixed the time but cost gigabytes; this costs 13 microseconds and no
+    memory.
+    """
+    rows = conn.execute(
+        "SELECT name, value, value_num, value_max, unit, origin, confidence, "
+        "tier, source_page, evidence FROM attributes INDEXED BY idx_attr_entity "
+        "WHERE entity_id=? AND status='accepted'", (entity_id,)).fetchall()
     out: dict[str, list] = {}
     for row in rows:
         if not include_derived and row["origin"] in ("derived", "inferred", "default"):
@@ -401,20 +409,60 @@ def _build_6nf(conn, spec, include_derived, min_confidence,
     return tables + _junction_tables(conn, spec)
 
 
+class LazyRows:
+    """Rows that stay in the database until something reads them.
+
+    The provenance table has a row for every value - a million for a hundred
+    thousand records - and it is only ever written out, never checked or
+    reshaped. Holding it as a list is most of a build's memory; iterating it
+    from a cursor costs almost none. Anything that needs random access (a sort,
+    an index) gets a materialised copy, once.
+    """
+
+    def __init__(self, conn, sql: str, params=()):
+        self._conn, self._sql, self._params = conn, sql, tuple(params)
+        self._list = None
+        self._count = None
+
+    def __iter__(self):
+        if self._list is not None:
+            return iter(self._list)
+        return (list(row) for row in self._conn.execute(self._sql, self._params))
+
+    def __len__(self):
+        if self._list is not None:
+            return len(self._list)
+        if self._count is None:
+            self._count = self._conn.execute(
+                f"SELECT COUNT(*) FROM ({self._sql})", self._params).fetchone()[0]
+        return self._count
+
+    def _materialise(self):
+        if self._list is None:
+            self._list = [list(row) for row in
+                          self._conn.execute(self._sql, self._params)]
+        return self._list
+
+    def __getitem__(self, item):
+        return self._materialise()[item]
+
+    def sort(self, *args, **kwargs):
+        self._materialise().sort(*args, **kwargs)
+
+
 def _provenance_table(conn, spec, include_derived) -> Table:
     columns = ["entity_type", "entity", "field", "value", "origin", "confidence",
                "source_url", "evidence", "fetched_at"]
-    rows = []
-    for row in conn.execute(
-            "SELECT e.type t, e.canonical_name n, a.name f, a.value v, a.origin o, "
-            "a.confidence c, a.evidence q, p.url u, p.fetched_at d "
-            "FROM attributes a JOIN entities e ON e.id=a.entity_id "
-            "LEFT JOIN pages p ON p.id=a.source_page WHERE a.status='accepted' "
-            "ORDER BY e.type, e.canonical_name, a.name"):
-        if not include_derived and row["o"] in ("derived", "inferred", "default"):
-            continue
-        rows.append([row["t"], row["n"], row["f"], row["v"], row["o"], row["c"],
-                     row["u"], (row["q"] or "")[:300], row["d"]])
+    skip = "" if include_derived else \
+        " AND a.origin NOT IN ('derived', 'inferred', 'default')"
+    rows = LazyRows(
+        conn,
+        "SELECT e.type, e.canonical_name, a.name, a.value, a.origin, a.confidence, "
+        "p.url, substr(COALESCE(a.evidence, ''), 1, 300), p.fetched_at "
+        "FROM attributes a JOIN entities e ON e.id = a.entity_id "
+        "LEFT JOIN pages p ON p.id = a.source_page "
+        f"WHERE a.status = 'accepted'{skip} "
+        "ORDER BY e.type, e.canonical_name, a.name")
     return Table("provenance", columns, rows, kind="provenance")
 
 
@@ -504,11 +552,23 @@ def _transitive_problems(table: Table) -> list[str]:
         return [row[index[column]] for row in table.rows
                 if row[index[column]] not in (None, "")]
 
+    total = len(table.rows)
     for left in non_key:
         left_values = values_of(left)
         distinct_left = set(left_values)
-        if len(distinct_left) < 2 or len(distinct_left) == len(left_values):
-            continue                      # unique, so it is a candidate key
+        # A dependency can only be *suspected* from data, never proved, so it
+        # takes strong evidence. Two prices that happen to repeat with the same
+        # rating is coincidence; a column with few distinct values that most
+        # rows share (a zone, a category) is what a lookup table looks like.
+        counts: dict = {}
+        for value in left_values:
+            counts[value] = counts.get(value, 0) + 1
+        repeated_groups = [v for v, n in counts.items() if n >= 2]
+        rows_in_repeats = sum(counts[v] for v in repeated_groups)
+        if (len(distinct_left) < 2 or len(repeated_groups) < 3
+                or len(distinct_left) > 0.5 * total
+                or rows_in_repeats < 0.5 * total):
+            continue
         for right in non_key:
             if left == right:
                 continue
@@ -521,7 +581,7 @@ def _transitive_problems(table: Table) -> list[str]:
                     broken = True
                     break
                 mapping[a] = b
-            if not broken and len(mapping) >= 2 and len(set(mapping.values())) > 1:
+            if not broken and len(mapping) >= 3 and len(set(mapping.values())) > 1:
                 problems.append(
                     f"{table.name}: '{right}' looks determined by non-key '{left}' "
                     f"- not 3NF (move the pair to a lookup table)")
