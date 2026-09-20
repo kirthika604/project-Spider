@@ -1,0 +1,34 @@
+project: chennai-places
+mode: project
+languages: [en, ta]
+
+sources:
+  seeds:
+    - - https://chennai.nic.in/tourism/tourist-places/
+  keywords: [Chennai, attraction, museum, temple, park, beach]
+  depth: 1
+  max_pages: 100
+  delay_seconds: 1.0
+  follow_other_domains: false
+
+entities:
+  place:
+    identity: [name]
+    fields:
+      name:
+        type: text
+        required: true
+        extract: ["h1"]
+      category:
+        type: text
+        vocabulary: categories
+        extract: [".category"]
+      area:
+        type: text
+        extract: [".area"]
+      opening_hours:
+        type: text
+        extract: [".opening-hours"]
+
+output:
+  formats: [csv, sqlite, json]

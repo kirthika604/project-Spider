@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img"
+     aria-label="Project Spider">
+  <title>Project Spider</title>
+  <defs>
+    <linearGradient id="sp-body" x1="32" y1="24" x2="32" y2="49"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2564A"/>
+      <stop offset="1" stop-color="#BE1C18"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Eight legs that arch like a spider's and end on a node: the crawl and
+       the graph it builds are the same drawing. -->
+  <g fill="none" stroke="currentColor" stroke-width="2.05" stroke-linecap="round"
+     opacity="0.9">
+    <path d="M26.8 31 C 21 21, 14.5 11.5, 8.5 13.5"/>
+    <path d="M25.8 34 C 19 29.5, 11 24.5, 4.8 25.8"/>
+    <path d="M25.8 37.6 C 19 41, 11.5 45, 5.6 44.2"/>
+    <path d="M26.8 40.6 C 21.5 47, 15.5 53.5, 10 55.5"/>
+    <path d="M37.2 31 C 43 21, 49.5 11.5, 55.5 13.5"/>
+    <path d="M38.2 34 C 45 29.5, 53 24.5, 59.2 25.8"/>
+    <path d="M38.2 37.6 C 45 41, 52.5 45, 58.4 44.2"/>
+    <path d="M37.2 40.6 C 42.5 47, 48.5 53.5, 54 55.5"/>
+  </g>
+  <g fill="currentColor">
+    <circle cx="8.5" cy="13.5" r="2.5"/><circle cx="4.8" cy="25.8" r="2.5"/>
+    <circle cx="5.6" cy="44.2" r="2.5"/><circle cx="10" cy="55.5" r="2.5"/>
+    <circle cx="55.5" cy="13.5" r="2.5"/><circle cx="59.2" cy="25.8" r="2.5"/>
+    <circle cx="58.4" cy="44.2" r="2.5"/><circle cx="54" cy="55.5" r="2.5"/>
+  </g>
+
+  <ellipse cx="32" cy="29.8" rx="4.5" ry="3.9" fill="url(#sp-body)"/>
+  <ellipse cx="32" cy="40.2" rx="6.3" ry="7.5" fill="url(#sp-body)"/>
+  <path d="M32 33.6 L36 40.2 L32 47.4 L28 40.2 Z" fill="#0B0E1A" opacity="0.32"/>
+  <circle cx="29.8" cy="28.9" r="1.2" fill="#0B0E1A" opacity="0.7"/>
+  <circle cx="34.2" cy="28.9" r="1.2" fill="#0B0E1A" opacity="0.7"/>
+</svg>

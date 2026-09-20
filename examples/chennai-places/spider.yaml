@@ -1,0 +1,130 @@
+# Places in Chennai, with their coordinates.
+#
+# The names come from a list you already have. The coordinates come from
+# OpenStreetMap, because no web page reliably states them - that is what a
+# connector is for. Everything after that is worked out from the two numbers.
+#
+#   spider init
+#   spider check
+#   spider crawl            # reads places.csv (a tier 0 source: you vouch for it)
+#   spider connectors       # asks OpenStreetMap for each place's coordinates
+#   spider build            # works out distance, bearing, zone, statistics
+#   spider export
+
+project: chennai-places
+mode: project
+languages: [en, ta]
+
+sources:
+  mode: only_listed                 # nothing is crawled; the list is the source
+  items:
+    - id: my_list
+      type: csv
+      location: places.csv
+      tier: 0                       # your own list: you vouch for it
+      map:
+        Place: name
+        Kind: kind
+
+entities:
+  place:
+    identity: [name]
+    fields:
+      name:      {type: text, required: true}
+      kind:      {type: text}
+      latitude:  {type: number, sanity: [12.6, 13.6]}   # Chennai's bounds
+      longitude: {type: number, sanity: [79.9, 80.5]}
+      place_type: {type: text}
+      osm_id:    {type: text}
+
+connectors:
+  - name: geocode                   # OpenStreetMap Nominatim
+    for: [place]
+    within: "Chennai, Tamil Nadu, India"
+    country: in
+
+derived:
+  # Chennai Central is 13.0827 N, 80.2707 E
+  distance_from_centre_km:
+    on: place
+    method: formula
+    inputs: [latitude, longitude]
+    formula: "distance_km(latitude, longitude, 13.0827, 80.2707)"
+    round: 2
+    unit: km
+    explain: "Great-circle distance from Chennai Central"
+
+  bearing_deg:
+    on: place
+    method: formula
+    inputs: [latitude, longitude]
+    formula: >-
+      (degrees(atan2(sin(radians(longitude - 80.2707)) * cos(radians(latitude)),
+      cos(radians(13.0827)) * sin(radians(latitude)) - sin(radians(13.0827)) *
+      cos(radians(latitude)) * cos(radians(longitude - 80.2707)))) + 360) % 360
+    round: 0
+    explain: "Compass bearing from the centre, 0 is north"
+
+  side_of_city:
+    on: place
+    method: lookup
+    inputs: [bearing_deg]
+    bands:
+      cutoffs: [45, 135, 225, 315]
+      labels: [north, east, south, west, north]
+    explain: "Which way out of the centre it lies"
+
+  zone:
+    on: place
+    method: lookup
+    inputs: [distance_from_centre_km]
+    bands:
+      cutoffs: [3, 8]
+      labels: [central, inner, outer]
+    explain: "How far out it is"
+
+  # the analyst's columns: where this place sits in the set as a whole
+  distance_rank:
+    on: place
+    method: formula
+    inputs: [distance_from_centre_km]
+    formula: "rank(distance_from_centre_km over place, 'asc')"
+    explain: "1 is the closest to the centre"
+
+  further_than_typical:
+    on: place
+    method: formula
+    inputs: [distance_from_centre_km]
+    formula: "zscore(distance_from_centre_km over place)"
+    round: 2
+    explain: "Standard deviations from the average distance"
+
+  median_distance_km:
+    on: place
+    method: formula
+    inputs: [distance_from_centre_km]
+    formula: "median(distance_from_centre_km over place)"
+    round: 2
+    explain: "The middle distance across every place (the same on every row)"
+
+derive_policy: suggest
+
+standardize:
+  level: standard
+  on_conflict: trusted_first
+  min_confidence: 0.5
+
+storage:
+  normal_form: 3NF
+  keep_provenance: true
+
+output:
+  targets:
+    - name: map_table
+      format: csv
+      path: exports/csv
+      sort_by: distance_from_centre_km
+      provenance: separate_table
+    - name: app
+      format: sqlite
+      path: exports/chennai.db

@@ -1,0 +1,138 @@
+project: solar-system
+mode: project
+languages: [en]
+described_as: >-
+  The planets of the solar system, their measured mass and radius, and the
+  quantities you work out from them.
+
+sources:
+  mode: start_here
+  seeds:
+    - http://localhost:8021/index.html
+    - http://localhost:8022/index.html
+  keywords: [planet, mass, radius, orbital]
+  depth: 1
+  max_pages: 40
+  delay_seconds: 0.0                   # local demo; use 1.0 on the web
+  trust_tiers:
+    localhost:8021: 1                  # an observatory: measured values
+    localhost:8022: 2                  # teaching notes: rounded values
+  trusted_order: [localhost:8021, localhost:8022]
+
+entities:
+  planet:
+    identity: [body]
+    fields:
+      body:
+        type: text
+        required: true
+        extract: [".body"]
+      mass_kg:
+        type: number
+        unit: kg
+        sanity: [1.0e20, 1.0e30]
+        extract: ['regex:Mass:\s*([\d.,]+(?:[eE][-+]?\d+)?)']
+      radius_m:
+        type: number
+        unit: m
+        sanity: [1.0e5, 1.0e9]
+        extract: ['regex:Mean radius:\s*([\d.,]+(?:[eE][-+]?\d+)?\s*(?:km|m)?)']
+      orbital_period_days:
+        type: number
+        unit: day
+        sanity: [1, 100000]
+        extract: ['regex:Orbital period:\s*([\d.,]+)']
+  moon:
+    identity: [name]
+    fields:
+      name: {type: text, vocabulary: moons}
+
+relations:
+  - {from: planet, name: has_moon, to: moon}
+
+derived:
+  # a formula with a constant and a power
+  volume_m3:
+    on: planet
+    method: formula
+    inputs: [radius_m]
+    formula: "(4 / 3) * pi * radius_m ** 3"
+    explain: "The volume of a sphere of that radius"
+
+  # depends on another derived field, so it must be calculated after it
+  density_kg_m3:
+    on: planet
+    method: formula
+    inputs: [mass_kg, volume_m3]
+    formula: "mass_kg / volume_m3"
+    round: 0
+    unit: kg
+    explain: "Mass divided by the volume worked out above"
+
+  surface_gravity_ms2:
+    on: planet
+    method: formula
+    inputs: [mass_kg, radius_m]
+    formula: "6.674e-11 * mass_kg / radius_m ** 2"
+    round: 2
+    explain: "GM over r squared at the surface"
+
+  escape_velocity_kms:
+    on: planet
+    method: formula
+    inputs: [mass_kg, radius_m]
+    formula: "sqrt(2 * 6.674e-11 * mass_kg / radius_m) / 1000"
+    round: 2
+    explain: "The speed needed to leave the surface, in km/s"
+
+  orbital_period_years:
+    on: planet
+    method: formula
+    inputs: [orbital_period_days]
+    formula: "convert(orbital_period_days, 'day', 'year')"
+    round: 3
+    explain: "The orbital period in years instead of days"
+
+  log_mass:
+    on: planet
+    method: formula
+    inputs: [mass_kg]
+    formula: "log10(mass_kg)"
+    round: 2
+    explain: "The order of magnitude of the mass"
+
+  size_class:
+    on: planet
+    method: lookup
+    inputs: [radius_m]
+    bands:
+      cutoffs: [3.0e6, 1.0e7]
+      labels: [small, terrestrial, giant]
+    explain: "Grouped by radius"
+
+  moon_count:
+    on: planet
+    method: aggregate
+    inputs: [moon]
+    formula: "count(moon via has_moon)"
+    explain: "How many moons are linked to this planet"
+
+derive_policy: suggest
+
+standardize:
+  level: standard
+  on_conflict: trusted_first           # the observatory's measured value wins
+  min_confidence: 0.5
+
+storage:
+  normal_form: 3NF
+  keep_provenance: true
+
+output:
+  include_derived: true
+  label_origin: true
+  targets:
+    - name: table
+      format: csv
+      path: exports/csv
+      provenance: separate_table

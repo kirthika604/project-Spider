@@ -1,0 +1,386 @@
+/* Project Spider - dashboard theme.
+   A web-slinger palette on a midnight grid: the tool is a crawler, so the
+   surface is webbing and the accents are the two colours a spider wears.
+   Operate mode: the data stays the loudest thing on the page. */
+
+@import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --ink:        #0B0E1A;
+  --surface:    #131A2E;
+  --raised:     #1B2440;
+  --line:       rgba(147, 169, 219, 0.16);
+  --line-soft:  rgba(147, 169, 219, 0.08);
+
+  --red:        #E8382F;   /* the accent: rules, chips, focus */
+  --red-hot:    #FF5347;
+  --red-deep:   #A8140F;
+  /* buttons carry white text, so their fill is a red that clears 4.5:1
+     against it - the bright accent above does not */
+  --red-solid:  #C81E17;
+  --red-solid-hi: #D92A22;
+  --blue:       #4E8CFF;
+  --blue-deep:  #1E3A8A;
+  --amber:      #F5A524;
+
+  --text:       #E9EDF8;
+  --muted:      #9AA7C7;
+  --dim:        #6E7C9F;
+
+  --display: 'Archivo Black', system-ui, sans-serif;
+  --sans:    'Archivo', system-ui, -apple-system, sans-serif;
+  --mono:    'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+
+  --r-sm: 6px; --r-md: 10px; --r-lg: 16px;
+  --shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.75),
+            0 2px 8px -2px rgba(0, 0, 0, 0.5);
+}
+
+/* ---------------------------------------------------------- the surface */
+/* The web is painted straight onto the app, as a background layer. An
+   overlay pseudo-element would need a stacking context, and giving one to
+   Streamlit's view container stops the main area from scrolling. */
+.stApp {
+  background-color: var(--ink);
+  background-image:
+    radial-gradient(900px 500px at 88% -8%, rgba(232, 56, 47, 0.10), transparent 60%),
+    radial-gradient(760px 460px at 4% 4%, rgba(78, 140, 255, 0.09), transparent 62%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240' viewBox='0 0 240 240'%3E%3Cg fill='none' stroke='%239AA7C7' stroke-opacity='0.06' stroke-width='1'%3E%3Cpath d='M0 0 L240 240 M240 0 L0 240 M120 0 L120 240 M0 120 L240 120'/%3E%3Cpath d='M120 120 m-30 0 a30 30 0 1 0 60 0 a30 30 0 1 0 -60 0'/%3E%3Cpath d='M120 120 m-62 0 a62 62 0 1 0 124 0 a62 62 0 1 0 -124 0'/%3E%3Cpath d='M120 120 m-96 0 a96 96 0 1 0 192 0 a96 96 0 1 0 -192 0'/%3E%3C/g%3E%3C/svg%3E");
+  background-repeat: no-repeat, no-repeat, repeat;
+  background-size: auto, auto, 240px 240px;
+  background-attachment: fixed, fixed, fixed;
+  color: var(--text);
+  font-family: var(--sans);
+}
+
+/* ------------------------------------------------------------ typography */
+h1, h2, h3, .sp-display {
+  font-family: var(--display);
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+h1 { font-size: 2.6rem; line-height: 1.02; margin: 0 0 0.2em; }
+h2 { font-size: 1.32rem; margin: 2.2rem 0 0.6rem; }
+h3 { font-size: 1.02rem; color: var(--muted); margin: 1.6rem 0 0.4rem; }
+
+/* a heading is announced by a thread of web, not by a coloured bar */
+h2::before {
+  content: '';
+  display: block;
+  width: 56px; height: 6px;
+  margin-bottom: 0.7rem;
+  background:
+    linear-gradient(90deg, var(--red) 0 34%, transparent 34%),
+    repeating-linear-gradient(90deg, var(--line) 0 1px, transparent 1px 7px);
+  border-radius: 2px;
+}
+p, label, li, span, div { font-family: var(--sans); }
+.stCaption, [data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] p {
+  color: var(--muted) !important;
+  font-family: var(--sans) !important;
+}
+code, pre, .sp-mono { font-family: var(--mono); font-size: 0.86em; }
+
+/* -------------------------------------------------------------- masthead */
+.sp-masthead {
+  display: flex; align-items: center; gap: 18px;
+  padding: 22px 26px;
+  margin: -12px 0 26px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background:
+    radial-gradient(420px 200px at 100% 0%, rgba(232, 56, 47, 0.16), transparent 70%),
+    linear-gradient(180deg, var(--raised), var(--surface));
+  box-shadow: var(--shadow);
+  position: relative;
+  overflow: hidden;
+}
+/* comic halftone, only here, only just visible */
+.sp-masthead::after {
+  content: '';
+  position: absolute; inset: 0;
+  background-image: radial-gradient(rgba(233, 237, 248, 0.16) 1px, transparent 1px);
+  background-size: 7px 7px;
+  -webkit-mask-image: linear-gradient(255deg, #000 0%, transparent 46%);
+  mask-image: linear-gradient(255deg, #000 0%, transparent 46%);
+  opacity: 0.5; pointer-events: none;
+}
+.sp-logo {
+  width: 74px; height: 74px; flex: none;
+  color: #A9BEEA;                      /* web silver, bright enough on navy */
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.55));
+}
+.sp-logo svg { width: 100%; height: 100%; display: block; }
+.sp-logo svg g[stroke] { stroke-width: 2.4; opacity: 1; }
+
+/* The one authored moment settles the webbing behind the title. It never
+   touches the mark: if it stalls, the texture is missing, not the spider. */
+.sp-masthead::before {
+  content: '';
+  position: absolute; inset: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='150' viewBox='0 0 300 150'%3E%3Cg fill='none' stroke='%23E9EDF8' stroke-opacity='0.3' stroke-width='1'%3E%3Cpath d='M300 0 L120 150 M300 0 L190 150 M300 0 L260 150 M300 0 L160 0 M300 0 L300 130'/%3E%3Cpath d='M256 0 Q262 26 300 30'/%3E%3Cpath d='M216 0 Q228 54 300 62'/%3E%3Cpath d='M176 0 Q196 84 300 96'/%3E%3C/g%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: top right;
+  opacity: 0.55;
+  animation: sp-web-settle 1100ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes sp-web-settle {
+  from { opacity: 0; transform: translate3d(14px, -10px, 0) scale(1.06); }
+  to   { opacity: 0.55; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sp-masthead::before { animation: none; }
+}
+
+.sp-wordmark {
+  font-family: var(--display);
+  font-size: 1.85rem; line-height: 1;
+  letter-spacing: -0.028em; text-transform: uppercase;
+  margin: 0;
+}
+.sp-wordmark em { font-style: normal; color: var(--red); }
+.sp-tagline {
+  color: var(--muted); font-size: 0.82rem; margin-top: 5px;
+  letter-spacing: 0.01em;
+}
+.sp-masthead-right { margin-left: auto; text-align: right; }
+
+/* ----------------------------------------------------------------- chips */
+.sp-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 999px;
+  font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; font-family: var(--sans);
+  border: 1px solid transparent;
+}
+.sp-chip-extracted { background: rgba(78, 140, 255, 0.14); color: #A8C6FF;
+                     border-color: rgba(78, 140, 255, 0.34); }
+.sp-chip-derived   { background: rgba(245, 165, 36, 0.13); color: #FFD08A;
+                     border-color: rgba(245, 165, 36, 0.32); }
+.sp-chip-inferred  { background: rgba(232, 56, 47, 0.14); color: #FFA79F;
+                     border-color: rgba(232, 56, 47, 0.36); }
+.sp-chip-ok        { background: rgba(70, 200, 140, 0.13); color: #86E3B6;
+                     border-color: rgba(70, 200, 140, 0.32); }
+/* a declared default: present, but claiming nothing */
+.sp-chip-default   { background: rgba(154, 167, 199, 0.12); color: #B9C4DE;
+                     border-color: rgba(154, 167, 199, 0.3); }
+
+/* --------------------------------------------------------------- sidebar */
+[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, #0E1424 0%, #0A0D18 100%);
+  border-right: 1px solid var(--line);
+}
+[data-testid="stSidebar"]::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 190px;
+  pointer-events: none; opacity: 0.6;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='190' viewBox='0 0 200 190'%3E%3Cg fill='none' stroke='%23E8382F' stroke-opacity='0.2' stroke-width='1'%3E%3Cpath d='M0 0 L200 96 M0 0 L96 190 M0 0 L200 190 M0 0 L150 0 M0 0 L0 170'/%3E%3Cpath d='M46 0 Q40 28 0 34'/%3E%3Cpath d='M86 0 Q74 56 0 66'/%3E%3Cpath d='M128 0 Q108 86 0 100'/%3E%3Cpath d='M172 0 Q142 118 0 136'/%3E%3C/g%3E%3C/svg%3E");
+}
+[data-testid="stSidebar"] .stRadio label { font-size: 0.92rem; }
+[data-testid="stSidebar"] hr { border-color: var(--line); }
+
+/* --------------------------------------------------------------- metrics */
+[data-testid="stMetric"] {
+  background: linear-gradient(180deg, var(--raised), var(--surface));
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+}
+[data-testid="stMetricLabel"] {
+  color: var(--muted) !important;
+  text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.68rem !important;
+}
+[data-testid="stMetricValue"] {
+  font-family: var(--display) !important;
+  font-size: 1.7rem !important;
+  font-variant-numeric: tabular-nums;
+  color: var(--text) !important;
+}
+
+/* --------------------------------------------------------------- buttons */
+.stButton button, .stDownloadButton button, .stFormSubmitButton button {
+  font-family: var(--sans); font-weight: 600; letter-spacing: 0.02em;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--text);
+  transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 140ms ease, border-color 140ms ease;
+}
+.stButton button:hover, .stDownloadButton button:hover {
+  background: #232E52; border-color: rgba(147, 169, 219, 0.34);
+  transform: translateY(-1px);
+  color: var(--text);
+}
+.stButton button[kind="primary"], .stFormSubmitButton button {
+  background: linear-gradient(180deg, var(--red-solid-hi), var(--red-solid));
+  border-color: #8E1009;
+  color: #FFFFFF;
+  box-shadow: 0 6px 18px -8px rgba(200, 30, 23, 0.85);
+}
+.stButton button[kind="primary"]:hover {
+  background: linear-gradient(180deg, #E02E26, var(--red-solid-hi));
+}
+.stButton button:disabled { opacity: 0.45; transform: none; }
+
+/* ---------------------------------------------------------------- inputs */
+.stTextInput input, .stTextArea textarea, .stNumberInput input,
+.stSelectbox [data-baseweb="select"] > div {
+  background: #0F1526 !important;
+  border: 1px solid var(--line) !important;
+  border-radius: var(--r-sm) !important;
+  color: var(--text) !important;
+  font-family: var(--sans);
+}
+.stTextArea textarea, .stTextInput input { font-family: var(--mono); font-size: 0.86rem; }
+.stTextInput input::placeholder, .stTextArea textarea::placeholder {
+  color: var(--dim);
+}
+.stTextInput input:focus, .stTextArea textarea:focus {
+  border-color: var(--red) !important;
+  box-shadow: 0 0 0 3px rgba(232, 56, 47, 0.18) !important;
+}
+
+/* ------------------------------------------------------------------ tabs */
+[data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid var(--line); }
+[data-baseweb="tab"] {
+  font-family: var(--sans); font-weight: 600; font-size: 0.86rem;
+  color: var(--muted); border-radius: var(--r-sm) var(--r-sm) 0 0;
+}
+[data-baseweb="tab"][aria-selected="true"] { color: var(--text); }
+[data-baseweb="tab-highlight"] { background: var(--red) !important; }
+
+/* ----------------------------------------------------------------- table */
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+[data-testid="stDataFrame"] * { font-variant-numeric: tabular-nums; }
+
+/* -------------------------------------------------------------- progress */
+[data-testid="stProgress"] > div > div > div > div {
+  background: linear-gradient(90deg, var(--red), var(--red-hot));
+}
+[data-testid="stProgress"] > div > div > div { background: rgba(147,169,219,0.14); }
+
+/* --------------------------------------------------- code, alerts, expander */
+.stCodeBlock, pre {
+  background: #0A0F1D !important;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+[data-testid="stExpander"] details {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+[data-testid="stAlert"] { border-radius: var(--r-md); border: 1px solid var(--line); }
+
+/* evidence: what a page actually said */
+.sp-quote {
+  font-family: var(--mono); font-size: 0.82rem; line-height: 1.55;
+  color: var(--muted);
+  padding: 10px 14px;
+  background: rgba(78, 140, 255, 0.06);
+  border-left: 1px solid var(--blue);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.sp-source { color: var(--dim); font-size: 0.76rem; font-family: var(--mono); }
+
+/* ------------------------------------------- the surfaces we did not draw */
+::selection { background: rgba(232, 56, 47, 0.32); color: #FFF; }
+* { caret-color: var(--red); }
+:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: #0A0D18; }
+::-webkit-scrollbar-thumb {
+  background: #2A3556;
+  border-radius: 99px;
+  border: 3px solid #0A0D18;
+}
+::-webkit-scrollbar-thumb:hover { background: #3C4A74; }
+html { scrollbar-color: #2A3556 #0A0D18; scrollbar-width: thin; }
+
+a { color: var(--blue); text-decoration-color: rgba(78, 140, 255, 0.4);
+    text-underline-offset: 3px; }
+a:hover { color: #8FB4FF; text-decoration-color: currentColor; }
+
+/* Streamlit chrome we do not need */
+#MainMenu, footer, [data-testid="stDecoration"] { display: none; }
+[data-testid="stHeader"] { background: transparent; }
+.block-container { padding-top: 2.6rem; max-width: 1280px; }
+
+/* ------------------------------------------------------- sidebar identity */
+.sp-side-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.sp-side-name {
+  font-family: var(--display); font-size: 1.24rem; letter-spacing: -0.02em;
+  color: var(--text);
+}
+.sp-side-ver { font-family: var(--mono); font-size: 0.68rem; color: var(--dim); }
+.sp-side-path {
+  font-family: var(--mono); font-size: 0.68rem; color: var(--dim);
+  word-break: break-all; line-height: 1.5; margin-bottom: 14px;
+}
+.sp-side-project {
+  font-family: var(--sans); font-weight: 700; font-size: 0.92rem; color: var(--text);
+}
+.sp-side-meta {
+  font-size: 0.72rem; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.07em; margin-bottom: 14px;
+}
+.sp-mast-project {
+  font-family: var(--display); font-size: 0.98rem; color: var(--text);
+  letter-spacing: -0.01em;
+}
+.sp-mast-counts {
+  font-family: var(--mono); font-size: 0.74rem; color: var(--muted); margin-top: 3px;
+}
+
+/* the radio in the sidebar is the primary navigation, so it reads as one */
+[data-testid="stSidebar"] .stRadio > div { gap: 2px; }
+[data-testid="stSidebar"] .stRadio label {
+  padding: 7px 10px; border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  transition: background 130ms ease, border-color 130ms ease;
+}
+[data-testid="stSidebar"] .stRadio label:hover {
+  background: rgba(147, 169, 219, 0.07);
+  border-color: var(--line-soft);
+}
+
+/* ------------------------------------------------------------ responsive */
+@media (max-width: 900px) {
+  .sp-masthead { flex-wrap: wrap; gap: 14px; padding: 18px 18px; }
+  .sp-masthead-right { margin-left: 0; text-align: left; width: 100%; }
+  .sp-logo { width: 54px; height: 54px; }
+  .sp-wordmark { font-size: 1.45rem; }
+  h1 { font-size: 2rem; }
+  .block-container { padding-top: 1.6rem; }
+}
+@media (max-width: 640px) {
+  .sp-tagline { display: none; }
+  .sp-masthead { padding: 16px; }
+}
+/* the project name must not break mid-word in the masthead */
+.sp-mast-project { overflow-wrap: break-word; max-width: 22ch; margin-left: auto; }
+.sp-mast-counts { white-space: nowrap; }
+.sp-masthead-name { min-width: 0; }
+.sp-mast-state { margin-top: 6px; }
+.sp-value {
+  font-family: var(--display); font-size: 1.22rem; color: var(--text);
+  letter-spacing: -0.01em; margin-right: 6px;
+}
+
+@media (max-width: 480px) {
+  /* the sidebar is a sheet over the content here, so it needs its own floor */
+  [data-testid="stSidebar"] { background: #0A0D18; }
+  [data-testid="stMetric"] { padding: 10px 12px; }
+  [data-testid="stMetricValue"] { font-size: 1.45rem !important; }
+}

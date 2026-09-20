@@ -1,0 +1,76 @@
+project: tourist-places-chennai
+mode: project
+languages:
+- en
+described_as: tourist places in Chennai, their category, area and opening hours
+sources:
+  mode: start_here
+  seeds: []
+  keywords:
+  - tourist
+  - places
+  - chennai
+  - category
+  - area
+  - opening
+  depth: 2
+  max_pages: 100
+  delay_seconds: 1.0
+  follow_other_domains: false
+entities:
+  tourist:
+    identity:
+    - name
+    fields:
+      name:
+        type: text
+        required: true
+      place:
+        type: text
+      chennai:
+        type: text
+      category:
+        type: text
+      area:
+        type: text
+      opening:
+        type: text
+      hour:
+        type: text
+  place:
+    identity:
+    - name
+    fields:
+      name:
+        type: text
+        required: true
+  category:
+    identity:
+    - name
+    fields:
+      name:
+        type: text
+        required: true
+relations:
+- from: tourist
+  name: has_place
+  to: place
+- from: tourist
+  name: has_category
+  to: category
+derived: {}
+standardize:
+  level: standard
+  dates: iso8601
+  on_conflict: keep_all_and_flag
+  min_confidence: 0.5
+storage:
+  normal_form: 3NF
+  database: .spider/dataset.db
+  keep_provenance: true
+output:
+  formats:
+  - csv
+  - sqlite
+  include_derived: true
+  label_origin: true

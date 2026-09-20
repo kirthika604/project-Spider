@@ -1,0 +1,16 @@
+code,name,level,parent,aliases,lat,lon
+IN-UT,Uttarakhand,state,IN,Uttaranchal;Uttrakhand,30.0668,79.0193
+IN-UT-CHA,Chamoli,district,IN-UT,Chamoli Garhwal,30.4,79.32
+IN-UT-PAU,Pauri Garhwal,district,IN-UT,Garhwal;Garwhal;Pauri,30.15,78.78
+IN-UT-RUD,Rudraprayag,district,IN-UT,Rudra Prayag,30.28,78.98
+IN-UT-UTT,Uttarkashi,district,IN-UT,Uttar Kashi,30.73,78.45
+IN-UT-PIT,Pithoragarh,district,IN-UT,Pithauragarh,29.58,80.22
+IN-UT-BAG,Bageshwar,district,IN-UT,Bageshvar,29.84,79.77
+IN-UT-ALM,Almora,district,IN-UT,Almorah,29.6,79.66
+IN-UT-NAI,Nainital,district,IN-UT,Naini Tal,29.38,79.45
+IN-UT-DEH,Dehradun,district,IN-UT,Dehra Dun;Doon,30.32,78.03
+IN-HP,Himachal Pradesh,state,IN,Himachal,31.1048,77.1734
+IN-HP-KIN,Kinnaur,district,IN-HP,Kinaur,31.58,78.43
+IN-HP-LAH,Lahaul and Spiti,district,IN-HP,Lahul and Spiti;Spiti,32.57,77.03
+IN-SK,Sikkim,state,IN,,27.533,88.5122
+IN-JK,Jammu and Kashmir,state,IN,J&K;Jammu & Kashmir,33.7782,76.5762

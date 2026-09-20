@@ -1,0 +1,25 @@
+vocabulary,term,alias
+uses,medicinal,medicine
+uses,medicinal,medicinal use
+uses,medicinal,ayurvedic use
+uses,medicinal,ayurveda
+uses,medicinal,therapeutic
+uses,medicinal,herbal medicine
+uses,religious,ritual
+uses,religious,ceremonial
+uses,religious,offering
+uses,religious,sacred
+uses,culinary,food
+uses,culinary,edible
+uses,culinary,tea
+uses,culinary,spice
+uses,aromatic,perfume
+uses,aromatic,incense
+uses,aromatic,essential oil
+uses,fodder,animal feed
+uses,fodder,forage
+uses,timber,wood
+uses,timber,fuelwood
+habit,herb,herbaceous
+habit,shrub,bush
+habit,tree,arboreal

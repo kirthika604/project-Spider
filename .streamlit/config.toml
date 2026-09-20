@@ -1,0 +1,15 @@
+# Streamlit's own widgets read these; the rest of the look is in
+# spider/assets/theme.css
+[theme]
+base = "dark"
+primaryColor = "#E8382F"
+backgroundColor = "#0B0E1A"
+secondaryBackgroundColor = "#131A2E"
+textColor = "#E9EDF8"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

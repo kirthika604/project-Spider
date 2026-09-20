@@ -1,0 +1,11 @@
+type,entity,field,value
+plant,Saussurea obvallata,altitude_m,3000-4500
+plant,Saussurea obvallata,flowering_month,July
+plant,Saussurea obvallata,climate_zone,alpine
+plant,Aconitum heterophyllum,altitude_m,2000-4000
+plant,Aconitum heterophyllum,flowering_month,August
+plant,Aconitum heterophyllum,climate_zone,temperate
+plant,Nardostachys jatamansi,flowering_month,July
+plant,Picrorhiza kurroa,altitude_m,3000-4300
+plant,Picrorhiza kurroa,flowering_month,June
+plant,Picrorhiza kurroa,climate_zone,alpine

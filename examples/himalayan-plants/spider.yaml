@@ -1,0 +1,112 @@
+project: himalayan-plants
+mode: project                          # project (3NF or higher) | analysis (0NF to 6NF)
+languages: [en, hi, ta]
+described_as: >-
+  Himalayan medicinal plants, where they grow, at what altitude, when they
+  flower and what they are used for.
+
+sources:
+  mode: start_here                     # only_listed | start_here | start_here_and_discover
+  seeds:
+    - http://localhost:8011/index.html
+    - http://localhost:8012/index.html
+    - http://localhost:8013/index.html
+  keywords: [plant, herb, medicinal, flora, altitude]
+  depth: 1
+  max_pages: 60
+  delay_seconds: 0.0                   # the demo sites are local; use 1.0 on the web
+  follow_other_domains: false
+  trust_tiers:
+    localhost:8011: 1                  # a research institute
+    localhost:8012: 2                  # a university department
+    localhost:8013: 3                  # a personal blog
+  trusted_order: [localhost:8011, localhost:8012, localhost:8013]
+
+entities:
+  plant:
+    identity: [scientific_name]        # how two records are judged the same
+    fields:
+      scientific_name:
+        type: text
+        required: true
+        extract: [".sci"]
+      altitude_m:
+        type: range
+        unit: m
+        sanity: [0, 9000]
+        extract: [".altitude"]
+      flowering_month:
+        type: month
+        sanity: [1, 12]
+        extract: [".flowering"]
+      altitude_ft:                     # never printed on a page - Spider suggests it
+        type: number
+        unit: ft
+  region:
+    identity: [name]
+    fields:
+      name: {type: text, vocabulary: places}
+  use:
+    identity: [name]
+    fields:
+      name: {type: text, vocabulary: uses, level: strict}
+
+relations:
+  - {from: plant, name: grows_in, to: region}
+  - {from: plant, name: used_for, to: use}
+
+derived:
+  climate_zone:
+    on: plant
+    method: lookup
+    inputs: [altitude_m.min]
+    bands: {cutoffs: [1500, 3000], labels: [subtropical, temperate, alpine]}
+    if_missing: leave_empty
+    explain: "Zone from minimum altitude"
+  season:
+    on: plant
+    method: formula
+    formula: "season_of(flowering_month)"
+    inputs: [flowering_month]
+    explain: "The season the plant flowers in"
+
+derive_policy: suggest                 # suggest | auto_safe | off
+
+standardize:
+  level: standard                      # raw | standard | strict, also settable per field
+  dates: iso8601
+  currency: INR
+  on_conflict: keep_all_and_flag       # majority | trusted_first | newest | keep_all_and_flag
+  min_confidence: 0.5
+
+storage:
+  normal_form: 3NF                     # 0NF-2NF need mode: analysis
+  database: .spider/dataset.db
+  keep_provenance: true
+
+output:
+  include_derived: true
+  label_origin: true
+  targets:
+    - name: app_database
+      format: sqlite
+      path: exports/plants.db
+      normal_form: 3NF
+      provenance: separate_table
+    - name: analyst_sheet
+      format: xlsx
+      path: exports/plants.xlsx
+      mode: analysis
+      normal_form: 0NF                 # one flat sheet
+      shape: wide
+      min_confidence: 0.5
+    - name: web_feed
+      format: json
+      path: exports/plants.json
+      nesting: nested
+      naming: camelCase
+
+# connectors:                          # uncomment to use the live services
+#   - {name: gbif, use: [validate_scientific_name, identifier]}
+#   - {name: wikidata, use: [aliases], languages: [en, hi, ta]}
+#   - {name: elevation, use: [check_altitude], tolerance_m: 300}

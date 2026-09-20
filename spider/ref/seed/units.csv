@@ -1,0 +1,15 @@
+quantity,unit,base_unit,factor,offset
+length,m,m,1,0
+length,km,m,1000,0
+length,cm,m,0.01,0
+length,ft,m,0.3048,0
+length,feet,m,0.3048,0
+length,in,m,0.0254,0
+length,mile,m,1609.344,0
+mass,kg,kg,1,0
+mass,g,kg,0.001,0
+mass,lb,kg,0.45359237,0
+temperature,c,c,1,0
+temperature,f,c,0.5555555556,-32
+time,day,d,1,0
+time,year,d,365.25,0
