@@ -1,0 +1,79 @@
+# A real website that has nothing to do with plants.
+# books.toscrape.com is a public sandbox for scraper practice.
+
+project: book-catalogue
+described_as: books with their price, rating and stock
+
+sources:
+  mode: start_here
+  seeds:                        # the first 5 of 50 listing pages, 20 books each
+    - https://books.toscrape.com/catalogue/page-1.html
+    - https://books.toscrape.com/catalogue/page-2.html
+    - https://books.toscrape.com/catalogue/page-3.html
+    - https://books.toscrape.com/catalogue/page-4.html
+    - https://books.toscrape.com/catalogue/page-5.html
+  keywords: [upc]               # only a book's own page mentions a UPC
+  depth: 1                      # a listing page -> the books it links to
+  max_pages: 200
+  delay_seconds: 0.2            # a sandbox that invites crawling; use 1.0 elsewhere
+  workers: 5
+
+entities:
+  book:
+    identity: [upc]             # what makes two pages the same book
+    label: title                # what a person calls it in reports
+    fields:
+      upc:
+        type: text
+        required: true          # a page without a UPC is a listing, not a book
+        extract: ["table.table-striped tr:first-child td"]
+      title:
+        type: text
+        extract: ["h1"]
+      price_gbp:
+        type: number
+        unit: gbp               # stays in pounds. Spider never converts money
+        sanity: [0, 1000]       # unless YOU give it rates: standardize.rates
+        extract: ["p.price_color"]
+      rating_class:
+        type: text
+        extract: ["p.star-rating@class"]    # the rating is a CSS class, not text
+      stock:
+        type: number
+        extract: ['regex:\((\d+) available\)']
+      category:
+        type: text
+        extract: ["ul.breadcrumb li:nth-child(3) a"]
+
+derived:
+  rating:                       # "star-rating Three" -> 3
+    on: book
+    method: rules
+    inputs: [rating_class]
+    rules:
+      - {if: "contains(rating_class, 'One')",   then: 1}
+      - {if: "contains(rating_class, 'Two')",   then: 2}
+      - {if: "contains(rating_class, 'Three')", then: 3}
+      - {if: "contains(rating_class, 'Four')",  then: 4}
+      - {if: "contains(rating_class, 'Five')",  then: 5}
+
+  price_usd:
+    on: book
+    inputs: [price_gbp]
+    formula: "price_gbp * 1.27"     # the rate is your choice - Spider has none
+    round: 2
+
+  stock_value_gbp:
+    on: book
+    inputs: [price_gbp, stock]
+    formula: "price_gbp * stock"
+    round: 2
+
+  value_for_money:              # reads another derived column, and is
+    on: book                    # calculated after it
+    inputs: [rating, price_gbp]
+    formula: "rating / price_gbp * 10"
+    round: 2
+
+output:
+  formats: [csv]

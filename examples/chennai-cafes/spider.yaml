@@ -1,0 +1,41 @@
+project: chennai-cafes
+described_as: cafes in Chennai with their coordinates
+
+sources:
+  mode: only_listed
+  items:
+    - id: osm_cafes
+      type: osm                    # OpenStreetMap: no list of names needed
+      area: Chennai                # resolved to a bounding box for you
+      tags: {amenity: cafe}        # what to fetch
+      tier: 2
+
+entities:
+  cafe:
+    identity: [osm_id]
+    label: name
+    fields:
+      osm_id:    {type: text, required: true}
+      name:      {type: text}
+      latitude:  {type: number, sanity: [12.7, 13.4]}
+      longitude: {type: number, sanity: [79.9, 80.4]}
+      cuisine:   {type: text}
+
+derived:
+  distance_from_centre_km:
+    on: cafe
+    inputs: [latitude, longitude]
+    formula: "distance_km(latitude, longitude, 13.0827, 80.2707)"
+    round: 2
+  zone:
+    on: cafe
+    method: lookup
+    inputs: [distance_from_centre_km]
+    bands: {cutoffs: [3, 8], labels: [central, inner, outer]}
+  distance_rank:
+    on: cafe
+    inputs: [distance_from_centre_km]
+    formula: "rank(distance_from_centre_km over cafe, 'asc')"
+
+storage: {normal_form: 3NF}
+output: {formats: [csv]}

@@ -47,6 +47,29 @@ merges, derives, checks and exports. The demo below needs no key at all.
 
 ---
 
+## It works on any subject
+
+Himalayan plants are one demo among several. Nothing about plants, India or any
+place is built in: a new project starts with no places, no vocabularies and no
+assumptions except units. Four projects ship in `examples/`, on unrelated
+subjects, and each runs with default settings:
+
+| Project | Source | What it shows |
+| --- | --- | --- |
+| [`book-catalogue`](examples/book-catalogue) | a **live website** (books.toscrape.com) | reading a rating from a CSS class, `£` prices left in pounds, list pages that must not become records |
+| [`chennai-cafes`](examples/chennai-cafes) | **OpenStreetMap**, no list of names | 244 real cafes with coordinates; distance, zone and rank derived |
+| [`planets`](examples/planets) | two small sites | scientific notation, physics derived from a mass and a radius, checked against NASA |
+| [`himalayan-plants`](examples/himalayan-plants) | three sites and a spreadsheet | cross-source agreement, conflicts, a value rejected as impossible |
+
+```bash
+mkdir /tmp/books && cd /tmp/books
+cp <this repo>/examples/book-catalogue/spider.yaml .
+spider init && spider check && spider crawl && spider build
+```
+
+A subject that *does* have its own lists loads them on request:
+`spider init --preset himalayan-plants`, or `spider ref load my-places.csv`.
+
 ## Try it in two minutes
 
 The example ships with three small websites so you can see cross-source
@@ -77,8 +100,30 @@ measured accuracy against the facts you listed in `gold.csv`.
 
 ## "I want places in Chennai with their coordinates"
 
-A worked answer, because this is the shape most projects take: you have a
-list of things, and the facts you want are not printed on any page.
+**You do not need a list.** Name an area and what you want in it, and Spider
+asks OpenStreetMap:
+
+```yaml
+sources:
+  items:
+    - {id: cafes, type: osm, area: Chennai, tags: {amenity: cafe}}
+```
+
+That fetches 244 real cafes with names and coordinates ([full
+example](examples/chennai-cafes)). Change `tags` for anything OpenStreetMap
+knows - `{shop: bakery}`, `{leisure: park}`, `{tourism: museum}` - and `area`
+for any place. The free public servers are busy at times, so Spider retries,
+fails over between three of them, and caches the answer.
+
+If you *already have* a list of names and only need the coordinates, that is
+the other shape - a list, plus a connector - and it is below. In both, no web
+page is expected to state a latitude, and everything else is worked out from
+the two numbers.
+
+### If you already have the names
+
+A worked answer for the other shape: you have a list of things, and the facts
+you want are not printed on any page.
 
 No web page reliably states a latitude. That is what a **connector** is for -
 an outside service that feeds the same verification chain as a crawl. So:
@@ -188,6 +233,74 @@ The five that matter most when you start:
 
 Do not guess at any of them: run `spider preview -n 5` and look at five real
 rows before spending a full crawl on the settings.
+
+### Reading a value that is not text
+
+Real pages hide facts in markup. `extract:` takes CSS selectors, `regex:`
+patterns, and `selector@attribute` to read an attribute instead of the text:
+
+```yaml
+rating: {extract: ["p.star-rating@class"]}          # class="star-rating Three"
+price:  {extract: ["meta[itemprop=price]@content"]}
+stock:  {extract: ['regex:\((\d+) available\)']}   # "In stock (22 available)"
+```
+
+A value read this way has no sentence on the page to quote, so its evidence is
+the selector itself - `spider explain` shows `[p.star-rating@class]` - and it
+is accepted, because a selector reading the markup is deterministic in a way a
+model's guess is not.
+
+### Telling a listing from a record
+
+A category page lists twenty books, each with a price; only a book's own page
+has a UPC. Mark what defines a record as `required: true` and a page without it
+is not a record - it is followed for its links and never turned into a row.
+
+### Naming a record
+
+`identity` decides that two pages are the same thing (a UPC, an id); `label`
+is what a person calls it. Reports and `spider explain` use the label, and the
+identity stays findable as an alias:
+
+```yaml
+book: {identity: [upc], label: title, fields: {...}}
+```
+
+### Money
+
+Spider has **no exchange rates of its own** and will not invent one. An amount
+keeps the currency it was written in (`£22.50` stays `22.50 GBP`), a field's own
+`unit: gbp` says what it is stored in, and converting needs rates you supply
+for the date your data is about:
+
+```yaml
+standardize:
+  currency: USD                                  # optional: store everything in one
+  rates: {USD: 1.0, GBP: 1.27, INR: 0.012}       # yours - Spider does not know them
+```
+
+Without a rate, a mismatch is rejected with the reason rather than converted
+with a number nobody chose.
+
+### When values are held back
+
+One source alone scores 0.80 (tier 1), 0.60 (tier 2) or 0.40 (tier 3), and a
+value below `standardize.min_confidence` (0.5) waits in the review queue. A site
+you named as a seed starts at tier 2 because you chose it; any site Spider
+wanders onto is tier 3. If values are held back, the build says so plainly and
+what to do about it:
+
+```
+NOTHING REACHED THE DATASET. All 600 value(s) are being held for review.
+    books.toscrape.com: 600 value(s), tier 3, confidence 0.4
+  To release them, do one of:
+    - trust the site:  sources.trust_tiers: {books.toscrape.com: 2}
+    - lower the floor: standardize.min_confidence: 0.4
+    - add a second source that says the same thing
+```
+
+Trust is applied when you build, not when you crawl, so changing it never needs
+a re-crawl.
 
 ## The seven steps
 
@@ -315,6 +428,10 @@ force:
 | `sources.mode` | `start_here` |
 | `sources.delay_seconds` | `1.0` per domain |
 | `sources.follow_other_domains` | `false` |
+| trust for a site you named as a seed | tier 2 (any other site Spider reaches: tier 3) |
+| `standardize.currency` | none - an amount keeps the currency it was written in |
+| `season_scheme` | `northern` - never assumed to be a monsoon |
+| `entities.<name>.match` | `fuzzy` for names; identifiers and names differing in a digit never merge |
 | `sources.max_ai_pages` | `100` |
 
 **A value for a column when nothing found one.** A field can declare a
@@ -418,6 +535,63 @@ spider build --normalize 0NF               # refused in project mode, with the r
 ```
 
 ---
+
+## Telling Spider how to derive a column
+
+You decide how a column is worked out. Spider does not guess - but you should
+not have to know the system to do it, so there are three steps and each one
+checks your work:
+
+```bash
+spider derive functions                 # everything a formula can use, with examples
+spider derive functions distance        # or search: "average", "date", "text" ...
+spider derive try "rating / price_gbp * 10"       # run it on your real records
+spider derive add value_for_money "rating / price_gbp * 10" --on book \
+    --explain "Rating points per pound" --round 2  # keep it
+```
+
+`try` shows real results beside the values they came from, and changes nothing:
+
+```
+Formula on book:  price_gbp / rating
+  reads: price_gbp, rating
+  tried on 100 record(s): 100 filled, 0 empty
+    It's Only the Himalayas    -> 22.585     (price_gbp=45.17, rating=2)
+    In the Country We Love     -> 5.5        (price_gbp=22, rating=4)
+```
+
+It refuses what cannot work, and says how to fix it:
+
+```
+  'prise_gbp' is not a field of book - did you mean 'price_gbp'?
+  there is no function called 'sqroot' - did you mean 'sqrt'?
+```
+
+That check matters more than it looks: a misspelt field used to produce empty
+cells with **no error at all**, and `spider check` called the file valid. It is
+now an error everywhere - `check`, `try`, `add` and the dashboard.
+
+`add` edits `spider.yaml` as text, adding one entry and touching nothing else:
+your comments, your layout and your other settings stay exactly as you wrote
+them (the previous file is kept as `spider.yaml.bak`).
+
+There is a **Calculate** screen in the dashboard (`spider dashboard`) that does
+the same with a form: pick the records, type a formula, see it run, name it,
+add it. It lists every function with a search box, and has one-click recipes -
+a percentage, a ratio, an age from a date, a yes/no flag, a distance.
+
+If a build leaves a derived column mostly empty it says why:
+
+```
+  value_for_money: filled 40 of 100 records; the rest lacked rating (60)
+```
+
+### What a formula can use
+
+73 functions in ten groups - arithmetic, maths, choosing and comparing, text,
+dates, units, geography, calendars, statistics down a column, and counts over
+related records. `spider derive functions` is the always-current list; a test
+fails if the evaluator accepts a function that list does not describe.
 
 ## Derived values
 
@@ -782,30 +956,49 @@ The look is original work: a spider and a web, not any character's insignia.
 
 ## How much can it collect?
 
-Be honest with yourself about the arithmetic before planning a large run.
-Spider fetches politely: one request per site per second by default. It
-fetches several **sites** at once (`sources.workers`, 5 by default), so
-throughput scales with the number of sites, not with the limit on any one of
-them.
+Two different limits, and they behave differently.
 
-| Shape of the job | Roughly |
-| --- | --- |
-| 1 site, 1s delay | ~3,600 pages an hour |
-| 10 sites, 5 workers | ~18,000 pages an hour |
-| a CSV, Excel or JSON endpoint | as fast as the file reads - thousands a second |
+**Crawling is limited by politeness, and always will be.** Spider waits a
+second between requests to one site (more if the site asks), and fetches
+several *sites* at once (`sources.workers`, 5 by default). So a crawl of one
+site is about 3,600 pages an hour, and ten sites about ten times that. A
+million web pages is arithmetic, not software - anything promising otherwise is
+ignoring robots.txt.
 
-So: tens of thousands of pages is an afternoon. **A million pages by crawling
-is not a Spider job** - at one request a second per site it is arithmetic, not
-software, and any tool that promises otherwise is either ignoring robots.txt
-or using bulk dumps. For datasets that size, feed it bulk sources instead:
-an API endpoint, an open-data CSV, a database extract (`spider source add`
-takes all three), where the row count is limited by your disk rather than by
-politeness.
+**Everything after the fetch is not, and was measured.** Rows read from a file
+(a CSV, a spreadsheet, an API, OpenStreetMap) skip the network entirely. This is
+the same pipeline - read, extract, standardize, merge, three derived columns
+including a whole-column z-score and rank, the normal-form check, the export,
+and a provenance row for every value - on a laptop:
 
-The store is SQLite, which is comfortable into the low millions of rows.
-What Spider is for is the shape of the problem, not the size: facts scattered
-over many sites that have to be matched, cleaned, cross-checked and joined.
-If the data is already in one place and one format, you do not need a crawler.
+| Rows | Reading the file | Building + exporting (CPU) | Peak memory | Values stored |
+| --- | --- | --- | --- | --- |
+| 20,000 | 0.7 s | 12 s | - | 200,000 |
+| 100,000 | 5 s | ~60 s | 0.3 GB | 1,000,000 |
+| 500,000 | 32 s | ~5.5 min | 0.95 GB | 5,000,000 |
+
+Time is linear in the rows and memory is nearly flat, so a million rows is
+roughly 11 minutes and under 2 GB. Wall-clock time is longer on a busy machine.
+The statistics were checked at 500,000 rows against an independent calculation
+(ranks span 1 to 500,000; the mean z-score is 0.00000).
+
+Two honest limits. The database is **~5 KB a row** (2.4 GB at 500,000), because
+every value keeps its source and its evidence - that is the point of the tool,
+but it means a million rows is a 5 GB file. And the output tables are built in
+memory, so beyond a few million rows you should split the input.
+
+It used to be far worse, and it is worth knowing why, because the same mistakes
+are easy to make again. Building 2,000 rows took **214 seconds** - 20,000 never
+finished in ten minutes. The causes were: comparing every new name with every
+existing one (n-squared; now blocked into neighbours), three missing database
+indexes so every lookup scanned a whole table, re-reading a whole column for
+every row's z-score, and committing after every row of a file. Tests now
+guard each of them.
+
+If the data is already in one place and one format, you do not need a
+crawler. What Spider is for is facts scattered over many sources that have to
+be matched, cleaned, cross-checked and joined - and it now handles that at the
+size you would actually meet.
 
 ## Politeness and good behaviour
 
