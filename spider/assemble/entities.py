@@ -31,6 +31,9 @@ class EntityIndex:
         self._known_aliases: set = set()
         self.merges: list[str] = []
         self.skipped_dense = 0
+        # authority ids already learned (a registry's own identifier for a name)
+        self._id_of: dict[tuple[str, str], set] = {}
+        self._names_with: dict[tuple[str, str], set] = {}
         self._load()
 
     def _load(self) -> None:
@@ -44,6 +47,26 @@ class EntityIndex:
                 "SELECT entity_id, alias FROM entity_aliases"):
             self._aliases.setdefault(names.key(row["alias"]), set()).add(row["entity_id"])
             self._known_aliases.add((row["entity_id"], row["alias"]))
+
+        for row in self.conn.execute(
+                "SELECT entity_type, authority, name, identifier FROM ref_authority_ids"):
+            key = names.key(row["name"])
+            ident = f"{row['authority']}:{row['identifier']}"
+            self._id_of.setdefault((row["entity_type"], key), set()).add(ident)
+            self._names_with.setdefault((row["entity_type"], ident), set()).add(key)
+
+    def _match_authority(self, entity_type: str, key: str) -> int | None:
+        """Two names a registry gives the same identifier are one record (FR-24)."""
+        for ident in self._id_of.get((entity_type, key), ()):
+            for other in self._names_with.get((entity_type, ident), ()):
+                if other == key:
+                    continue
+                found = self._by_key.get((entity_type, other))
+                if found is None:
+                    found = next(iter(self._aliases.get(other, ())), None)
+                if found is not None and self._type_of.get(found) == entity_type:
+                    return found
+        return None
 
     @staticmethod
     def _block_keys(key: str) -> list[str]:
@@ -75,6 +98,13 @@ class EntityIndex:
             if len(self.merges) < 200:
                 self.merges.append(f"{clean} -> entity {matched}")
             return matched
+
+        shared = self._match_authority(entity_type, names.key(clean))
+        if shared:
+            self.add_alias(shared, clean)
+            if len(self.merges) < 200:
+                self.merges.append(f"{clean} = entity {shared} (same registry identifier)")
+            return shared
 
         fuzzy = self._match_fuzzy(entity_type, clean)
         if fuzzy:

@@ -6,6 +6,7 @@ from .base import Connector, ConnectorResult, ConnectorValue
 from .elevation import ElevationConnector
 from .gbif import GBIFConnector
 from .geocode import GeocodeConnector
+from .lgd import LGDConnector
 from .wikidata import WikidataConnector
 
 REGISTRY = {
@@ -13,6 +14,7 @@ REGISTRY = {
     "wikidata": WikidataConnector,
     "elevation": ElevationConnector,
     "geocode": GeocodeConnector,
+    "lgd": LGDConnector,
 }
 
 
@@ -40,7 +42,14 @@ def run(conn, spec, on_event=None) -> dict:
     if not connectors:
         return summary
 
+    import os
     for connector in connectors:
+        key_env = connector.config.get("key_env")
+        if key_env and not os.environ.get(key_env):
+            # a missing key disables this connector only (section 15, rule 4)
+            summary["skipped"].append(
+                f"{connector.name}: disabled - set {key_env} in .env to use it")
+            continue
         added = {"values": 0, "aliases": 0, "identifiers": 0, "conflicts": 0}
         for entity_type in spec.entities:
             if not connector.applies_to(entity_type, spec):
@@ -59,6 +68,8 @@ def run(conn, spec, on_event=None) -> dict:
                 if not result.ok:
                     continue
                 for value in result.values:
+                    if not _wanted(connector, value):
+                        continue
                     if value.kind == "alias":
                         conn.execute(
                             "INSERT OR IGNORE INTO entity_aliases"
@@ -82,12 +93,34 @@ def run(conn, spec, on_event=None) -> dict:
                 on_event("connector", name=connector.name,
                          entity=row["canonical_name"], note=result.note)
         conn.commit()
+        if connector.capped:
+            summary["skipped"].append(
+                f"{connector.name}: daily_cap of {connector.config.get('daily_cap')} "
+                f"reached - the rest waits for tomorrow or a cached answer")
         summary["connectors"].append({"name": connector.name, "calls": connector.calls,
                                       "cache_hits": connector.cache_hits, **added})
         for key in ("values", "aliases", "identifiers", "conflicts"):
             summary[key] += added[key]
     del score, jdump, now
     return summary
+
+
+def _wanted(connector, value) -> bool:
+    """Honour `use:` - a connector only does the jobs the project listed."""
+    use = connector.config.get("use")
+    if not use:
+        return True
+    use = {str(u).lower() for u in use}
+    if value.kind == "alias":
+        return "aliases" in use
+    if value.kind == "identifier":
+        return bool(use & {"identifier", "identifiers", "place_codes"})
+    if value.kind == "check":
+        return bool(use & {"check_altitude", "check"})
+    if value.field in ("scientific_name",):
+        return bool(use & {"validate_scientific_name", "accepted_name", "values"})
+    return bool(use & {"values", "classification", value.field}) or \
+        bool(use & {"place_codes"} and value.field in ("place_code", "state", "district"))
 
 
 def _entity_values(conn, entity_id: int) -> dict:
@@ -125,8 +158,25 @@ def _record_value(conn, spec, connector, entity_type, entity_id, value) -> bool:
     """A connector value joins the dataset like any other source."""
     from ..assemble.confidence import base_for
     from ..store.db import jdump, now
-    if not spec.entity_field(entity_type, value.field):
+    field_spec = spec.entity_field(entity_type, value.field)
+    if not field_spec:
         return False
+    if field_spec.sanity is not None:
+        # an outside value passes the same sanity rules as a crawled one (rule 1)
+        from ..extract import sanity
+        from ..standardize.engine import Standardizer
+        standard = Standardizer(conn, spec).standardize(entity_type, value.field,
+                                                        value.value)
+        ok, reason = sanity.check(field_spec, standard)
+        if standard.rejected or not ok:
+            conn.execute(
+                "INSERT INTO review_queue(kind,target,entity_id,field,reason,detail,"
+                "created_at) VALUES(?,?,?,?,?,?,?)",
+                ("sanity", f"{entity_type}.{value.field}", entity_id, value.field,
+                 f"{connector.name} gave '{value.value}': {reason or standard.reason}",
+                 jdump({"value": value.value, "url": value.url,
+                        "quote": value.evidence}), now()))
+            return False
     existing = conn.execute(
         "SELECT id, value, origin FROM attributes WHERE entity_id=? AND name=? "
         "AND status='accepted'", (entity_id, value.field)).fetchone()

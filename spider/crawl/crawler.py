@@ -281,6 +281,7 @@ def crawl_from_spec(conn, spec, *, max_pages=None, depth=None, refresh=False,
                 except Exception:
                     return True, "check unavailable"   # never lose a page to an outage
 
+    spec.use_reference(conn)
     crawler = Crawler(
         conn, workers=getattr(src, "workers", 5),
         keywords=src.keywords, depth=depth if depth is not None else src.depth,

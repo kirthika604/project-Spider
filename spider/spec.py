@@ -406,8 +406,10 @@ class SourcesSpec:
 
 
 def domain_of(url: str) -> str:
-    from urllib.parse import urlparse
-    return (urlparse(url).netloc or "").lower().lstrip("www.")
+    """The site a URL belongs to. One implementation, shared with the crawler, so
+    a trust tier written for `webmd.com` matches the pages crawled from it."""
+    from .crawl.frontier import domain_of as canonical
+    return canonical(url)
 
 
 @dataclass
@@ -416,6 +418,7 @@ class StandardizeSpec:
     dates: str = "iso8601"
     currency: str = ""                    # empty: keep the currency as written
     rates: dict = field(default_factory=dict)
+    rates_auto: bool = False              # look the rate up for the source's date
     on_conflict: str = "keep_all_and_flag"
     min_confidence: float = 0.5
 
@@ -427,7 +430,10 @@ class StandardizeSpec:
             dates=str(raw.get("dates", "iso8601")),
             currency=str(raw.get("currency") or "").upper(),
             rates={str(k).upper(): float(v)
-                   for k, v in (raw.get("rates") or {}).items()},
+                   for k, v in (raw.get("rates") or {}).items()}
+            if isinstance(raw.get("rates"), dict) else {},
+            rates_auto=(str(raw.get("rates")).lower() == "auto"
+                        or bool(raw.get("rates_auto", False))),
             on_conflict=str(raw.get("on_conflict", "keep_all_and_flag")),
             min_confidence=float(raw.get("min_confidence", 0.5)),
         )
@@ -449,6 +455,9 @@ class StorageSpec:
         )
 
 
+PROVENANCE_FIELDS = ("confidence", "origin", "source", "quote", "fetched_at")
+
+
 @dataclass
 class TargetSpec:
     name: str
@@ -467,6 +476,9 @@ class TargetSpec:
     descending: bool = False
     split: str = "per_table"          # per_table | single
     template: str | None = None       # a Jinja file, for `format: template`
+    where: dict = field(default_factory=dict)          # keep only rows matching
+    provenance_fields: list[str] = field(default_factory=list)   # which extras, as columns
+    multi_value: str = "child_table"  # child_table | joined | rows
 
     @classmethod
     def parse(cls, raw: Any, index: int = 0) -> "TargetSpec":
@@ -489,6 +501,9 @@ class TargetSpec:
             descending=bool(raw.get("descending", False)),
             split=str(raw.get("split", "per_table")),
             template=raw.get("template"),
+            where=dict(raw.get("where") or {}),
+            provenance_fields=[str(f) for f in (raw.get("provenance_fields") or [])],
+            multi_value=str(raw.get("multi_value", "child_table")),
         )
 
 
@@ -532,6 +547,7 @@ class Spec:
     derive_policy: str = "suggest"
     season_scheme: str = "northern"
     ai: dict = field(default_factory=dict)
+    ref_ranks: dict = field(default_factory=dict)   # domain -> tier, from the reference DB
     path: Path | None = None
     raw: dict = field(default_factory=dict)
 
@@ -607,6 +623,17 @@ class Spec:
             add(Problem("error", "storage.normal_form",
                         f"{nf} is below 3NF and mode is project",
                         "use 3NF or higher, or set `mode: analysis`"))
+
+        for site, tier in self.sources.trust_tiers.items():
+            if tier not in (1, 2, 3):
+                add(Problem("error", f"sources.trust_tiers.{site}",
+                            f"tier {tier} is not a trust tier",
+                            "use 1 (most trusted), 2 or 3; tier 0 is only for your own data"))
+        for item in self.sources.items:
+            if item.tier not in (0, 1, 2, 3):
+                add(Problem("error", f"sources.items.{item.id}.tier",
+                            f"tier {item.tier} is not a trust tier",
+                            "use 0 (your own data), 1, 2 or 3"))
 
         if self.standardize.level not in STANDARD_LEVELS:
             add(Problem("error", "standardize.level",
@@ -754,6 +781,22 @@ class Spec:
                 add(Problem("error", f"output.targets.{target.name}",
                             f"unknown provenance '{target.provenance}'",
                             "use none, columns or separate_table"))
+            for extra in target.provenance_fields:
+                if extra not in PROVENANCE_FIELDS:
+                    add(Problem("error", f"output.targets.{target.name}",
+                                f"unknown provenance field '{extra}'",
+                                f"use some of {', '.join(PROVENANCE_FIELDS)}"))
+            if target.multi_value not in ("child_table", "joined", "rows"):
+                add(Problem("error", f"output.targets.{target.name}",
+                            f"unknown multi_value '{target.multi_value}'",
+                            "use child_table, joined or rows"))
+            for column in target.where:
+                if not any(column in ent.fields or column == f"{name}_id"
+                           for name, ent in self.entities.items()) and \
+                        not any(d.name == column for d in self.derived.values()):
+                    add(Problem("error", f"output.targets.{target.name}.where",
+                                f"'{column}' is not a field of any entity",
+                                "filter on a field name from `entities`"))
             if target.split not in ("per_table", "single"):
                 add(Problem("error", f"output.targets.{target.name}",
                             f"unknown split '{target.split}'",
@@ -898,10 +941,35 @@ class Spec:
                   if i.type == "website" and i.location}
         return {n for n in names if n}
 
+    def is_authoritative(self, field_name: str, source_id, domain) -> bool:
+        """Did the user name this source as the authority for this field?
+
+        A source is matched by id (files, endpoints) or, for a crawled page,
+        by the website source whose site it came from.
+        """
+        for item in self.sources.items:
+            if field_name not in item.authoritative_for and "*" not in item.authoritative_for:
+                continue
+            if source_id is not None and item.id == source_id:
+                return True
+            if (source_id is None and item.type == "website" and item.location
+                    and domain and domain_of(item.location) == domain):
+                return True
+        return False
+
+    def use_reference(self, conn) -> None:
+        """Load the reference database's source ranking (FR-26)."""
+        try:
+            self.ref_ranks = {r["domain"]: int(r["tier"]) for r in conn.execute(
+                "SELECT domain, tier FROM ref_source_rank") if r["tier"] in (1, 2, 3)}
+        except Exception:
+            self.ref_ranks = {}
+
     def tier_for(self, url_or_domain: str) -> int:
         """How much to trust a site, from most specific to least.
 
-        1. what `trust_tiers` says about it
+        1. what `trust_tiers` says about it, then what the reference
+           database's source ranking says (the project file always wins)
         2. a guess from the address: government 1, universities and .org 2
         3. a site you pointed Spider at yourself is at least tier 2. You chose
            it, so it is not a stranger - and treating it as one would hold back
@@ -915,6 +983,8 @@ class Spec:
         for known, tier in self.sources.trust_tiers.items():
             if dom.endswith(known):
                 return tier
+        if dom in self.ref_ranks:
+            return self.ref_ranks[dom]
         guess = 3
         if dom.endswith(".gov.in") or dom.endswith(".gov") or dom.endswith(".nic.in"):
             guess = 1

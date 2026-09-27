@@ -81,6 +81,9 @@ class BuildReport:
         if len(self.rejections) < MAX_REJECTION_EXAMPLES:
             self.rejections.append((url, what, why))
     decisions_applied: int = 0
+    suggested: list = field(default_factory=list)     # derivations waiting for approval
+    auto_applied: list = field(default_factory=list)  # `auto_safe` ones already applied
+    build_report_id: int | None = None
 
 
 def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
@@ -88,6 +91,7 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
     on_event = on_event or (lambda *a, **k: None)
     report = BuildReport(normal_form=spec.storage.normal_form)
 
+    spec.use_reference(conn)
     ai = None
     if use_ai:
         from ..extract import ai as ai_module
@@ -143,7 +147,8 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
         for candidate in candidates:
             report.candidates += 1
             standard = standardizer.standardize(candidate.entity_type,
-                                                candidate.field, candidate.raw_value)
+                                                candidate.field, candidate.raw_value,
+                                                on_date=candidate.fetched_at)
             if standard.rejected:
                 report.rejected_vocab += 1
                 report.reject(candidate.url, f"{candidate.entity_type}."
@@ -197,13 +202,23 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
                 _write_attribute(conn, entity_id, field_name, group, False, report, spec)
             continue
 
-        decision = conflicts.resolve(candidates, rule, spec.sources.trusted_order)
+        authority = [c for c in candidates
+                     if spec.is_authoritative(field_name, c.source_id, c.domain)]
+        for c in authority:
+            c.tier = 1                  # the user named it the authority for this field
+        decision = conflicts.resolve(candidates, rule, spec.sources.trusted_order,
+                                     authority=authority)
         groups = conflicts.group(decision.winners)
         disagreement = len(conflicts.group(candidates)) > 1
         if disagreement:
             report.conflicts += 1
+            note = decision.note
+            own = [g for g in conflicts.group(candidates) if any(c.tier == 0 for c in g)]
+            others = [g for g in conflicts.group(candidates) if g not in own]
+            if own and any(len({c.domain for c in g if c.tier == 1}) >= 2 for g in others):
+                note = "your own data (tier 0) disagrees with two or more tier 1 sources"
             _queue(conn, "conflict", f"{entity_type}.{field_name}", entity_id, field_name,
-                   f"sources disagree ({decision.note})",
+                   f"sources disagree ({note})",
                    {"rule": rule,
                     "options": [{"value": g[0].value,
                                  "sources": [{"url": c.url, "domain": c.domain,
@@ -246,6 +261,9 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
 
     _remember(conn)
 
+    # ---------------------------------------------- 5a. suggested derivations
+    _suggest_derivations(conn, spec, report, use_ai)
+
     # ----------------------------------------------------------- 5b. labels
     _apply_labels(conn, spec)
 
@@ -269,11 +287,43 @@ def build(conn, spec, *, use_ai: bool = True, limit: int | None = None,
     report.low_confidence = conn.execute(
         "SELECT COUNT(*) c FROM attributes WHERE status='review'").fetchone()["c"]
 
+    # the standardization report is kept with the build, so `spider report` and
+    # the dashboard show it whichever of them ran the build (FR-28)
+    report.build_report_id = conn.execute(
+        "INSERT INTO build_reports(built_at,mode,normal_form,passed,changes) "
+        "VALUES(?,?,?,?,?)",
+        (now(), spec.mode, spec.storage.normal_form, None,
+         jdump(report.standardization))).lastrowid
     conn.commit()
     return report
 
 
 # ------------------------------------------------------------------ helpers
+def _suggest_derivations(conn, spec, report, use_ai: bool) -> None:
+    """FR-25: after a build, propose derivations for empty fields.
+
+    `suggest` queues them for approval; `auto_safe` applies the exact ones
+    (unit conversions and the like) and queues the rest; `off` does nothing.
+    An AI-proposed formula is never applied on its own.
+    """
+    if spec.derive_policy == "off":
+        return
+    from ..derive import suggest as suggest_module
+    suggestions = suggest_module.find(conn, spec, use_ai=use_ai)
+    if spec.derive_policy == "auto_safe":
+        applied = [s for s in suggestions if s.safe]
+        suggest_module.save(conn, suggestions)
+        for suggestion in applied:
+            suggest_module.approve(conn, spec, suggestion.name)
+        if applied:
+            DeriveEngine(conn, spec).run([s.name for s in applied])
+            if spec.path:
+                spec.save()
+        report.auto_applied = [s.name for s in applied]
+        report.suggested = [s for s in suggestions if not s.safe]
+    else:
+        suggest_module.save(conn, suggestions)
+        report.suggested = suggestions
 def _apply_defaults(conn, spec) -> int:
     """Fill a cell a field declares a `default:` for, when nothing found one.
 

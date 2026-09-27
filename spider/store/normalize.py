@@ -48,7 +48,9 @@ class NormalFormError(Exception):
 # tables carry them on purpose (D8, "role of 6NF")
 VALUE_METADATA = {"unit", "origin", "confidence", "valid_from", "valid_to",
                   "source_url", "evidence", "fetched_at"}
-METADATA_SUFFIXES = ("_confidence", "_origin", "_source", "_evidence")
+METADATA_SUFFIXES = ("_confidence", "_origin", "_source", "_evidence", "_quote",
+                     "_fetched_at")
+DEFAULT_PROVENANCE = ("confidence", "origin", "source")
 
 
 def is_metadata(column: str) -> bool:
@@ -69,8 +71,26 @@ def _entities(conn, entity_type: str):
         "ORDER BY canonical_name", (entity_type,)).fetchall()
 
 
+class _Pages(dict):
+    """page id -> url, with each page's fetch time alongside."""
+    fetched: dict
+
+
 def _page_urls(conn) -> dict:
-    return {r["id"]: r["url"] for r in conn.execute("SELECT id, url FROM pages")}
+    pages = _Pages()
+    pages.fetched = {}
+    for r in conn.execute("SELECT id, url, fetched_at FROM pages"):
+        pages[r["id"]] = r["url"]
+        pages.fetched[r["id"]] = r["fetched_at"]
+    return pages
+
+
+def _base_field(column: str) -> str:
+    """`altitude_m_source` -> `altitude_m` (a provenance column's own field)."""
+    for suffix in METADATA_SUFFIXES:
+        if column.endswith(suffix):
+            return column[: -len(suffix)]
+    return column
 
 
 def _accepted_ids(conn) -> set:
@@ -126,7 +146,7 @@ def _num(value):
 # ------------------------------------------------------------------ builders
 def build_dataset(conn, spec, *, normal_form=None, mode=None, include_derived=True,
                   min_confidence=None, provenance="separate_table",
-                  naming="snake_case") -> Dataset:
+                  naming="snake_case", provenance_fields=None) -> Dataset:
     level = (normal_form or spec.storage.normal_form).upper()
     mode = mode or spec.mode
     if level not in NORMAL_FORMS:
@@ -140,12 +160,17 @@ def build_dataset(conn, spec, *, normal_form=None, mode=None, include_derived=Tr
         "0NF": _build_flat, "1NF": _build_1nf, "2NF": _build_2nf, "3NF": _build_3nf,
         "BCNF": _build_3nf, "4NF": _build_4nf, "5NF": _build_4nf, "6NF": _build_6nf,
     }[level]
-    with_columns = (provenance == "columns")
+    with_columns = (tuple(provenance_fields or DEFAULT_PROVENANCE)
+                    if provenance == "columns" else False)
     tables = builder(conn, spec, include_derived, min_confidence,
                      provenance_columns=with_columns)
 
     if spec.storage.keep_provenance and provenance == "separate_table":
         tables.append(_provenance_table(conn, spec, include_derived))
+    if provenance != "none" and level not in ("0NF", "1NF"):   # a flat sheet stays one sheet
+        identifiers = _identifier_table(conn)
+        if identifiers is not None:
+            tables.append(identifiers)
 
     dataset = Dataset(tables=tables, normal_form=level, mode=mode)
     # the structure is checked first: a display name must never change the
@@ -218,10 +243,19 @@ def _single_row(conn, spec, entity_type, entity, include_derived, min_confidence
             chosen = rows[0] if len(rows) == 1 else _best(rows)
             row.append(_display(chosen, spec, entity_type))
         if provenance_columns:
-            columns += [f"{name}_confidence", f"{name}_origin", f"{name}_source"]
-            row += [chosen["confidence"] if chosen else None,
-                    chosen["origin"] if chosen else None,
-                    (urls or {}).get(chosen["source_page"]) if chosen else None]
+            wanted = (provenance_columns if isinstance(provenance_columns, tuple)
+                      else DEFAULT_PROVENANCE)
+            fetched = getattr(urls, "fetched", {}) or {}
+            page = chosen["source_page"] if chosen else None
+            available = {
+                "confidence": chosen["confidence"] if chosen else None,
+                "origin": chosen["origin"] if chosen else None,
+                "source": (urls or {}).get(page) if chosen else None,
+                "quote": chosen["evidence"] if chosen else None,
+                "fetched_at": fetched.get(page) if chosen else None}
+            for extra in wanted:
+                columns.append(f"{name}_{extra}")
+                row.append(available[extra])
     return columns[1:], row
 
 
@@ -319,9 +353,7 @@ def _entity_tables(conn, spec, include_derived, min_confidence,
             names, row = _single_row(conn, spec, entity_type, entity, include_derived,
                                      min_confidence,
                                      provenance_columns=provenance_columns, urls=urls)
-            keep = [i for i, n in enumerate(names)
-                    if n.split("_confidence")[0].split("_origin")[0]
-                    .split("_source")[0] not in multi]
+            keep = [i for i, n in enumerate(names) if _base_field(n) not in multi]
             columns = [f"{entity_type}_id"] + [names[i] for i in keep]
             rows.append([row[0]] + [row[i + 1] for i in keep])
         if columns is None:
@@ -466,6 +498,22 @@ def _provenance_table(conn, spec, include_derived) -> Table:
     return Table("provenance", columns, rows, kind="provenance")
 
 
+def _identifier_table(conn):
+    """The registry identifiers (GBIF, Wikidata, LGD ...) of the records written."""
+    rows = [[r["type"], r["canonical_name"], r["authority"], r["identifier"]]
+            for r in conn.execute(
+                "SELECT e.type, e.canonical_name, i.authority, i.identifier "
+                "FROM ref_authority_ids i JOIN entities e ON e.type=i.entity_type "
+                "AND (lower(e.canonical_name)=lower(i.name) OR e.id IN "
+                "(SELECT entity_id FROM entity_aliases WHERE lower(alias)=lower(i.name))) "
+                "WHERE e.id IN (SELECT entity_id FROM attributes WHERE status='accepted') "
+                "GROUP BY e.id, i.authority ORDER BY e.type, e.canonical_name")]
+    if not rows:
+        return None
+    return Table("identifiers", ["entity_type", "entity", "authority", "identifier"],
+                 rows, kind="provenance")
+
+
 # -------------------------------------------------------------- level checks
 def check_level(dataset: Dataset, level: str) -> tuple[bool, list[str]]:
     """The automatic check each output must pass before it is written (D8)."""
@@ -503,6 +551,7 @@ def check_level(dataset: Dataset, level: str) -> tuple[bool, list[str]]:
                 if non_key and table.kind == "junction":
                     problems.append(
                         f"{table.name} keeps {non_key} beside a composite key - not 2NF")
+                problems.extend(_partial_dependency_problems(table))
 
     if level in ("3NF", "BCNF", "4NF", "5NF", "6NF"):
         for table in tables:                       # 3NF: no transitive dependency
@@ -518,6 +567,7 @@ def check_level(dataset: Dataset, level: str) -> tuple[bool, list[str]]:
             if table.kind == "entity" and len(multi) > 1:
                 problems.append(
                     f"{table.name} mixes independent many-valued facts {multi} - not 4NF")
+            problems.extend(_multivalued_problems(table))
 
     if level in ("5NF", "6NF"):
         for table in tables:
@@ -644,3 +694,68 @@ def _join_dependency_problems(table: Table) -> list[str]:
         extras = len(rebuilt - triples)
         return [f"{table.name}: pairwise join creates {extras} spurious tuple(s) - not 5NF"]
     return []
+
+
+def _partial_dependency_problems(table: Table) -> list[str]:
+    """2NF: a column that depends on only part of a composite key.
+
+    Read from the data: if every value of one key column always goes with the
+    same value of a non-key column, that column belongs to that key column's
+    own table, not to the combination.
+    """
+    payload = [c for c in table.columns
+               if c not in table.key and not is_metadata(c)]
+    if len(table.rows) < 2 or not payload:
+        return []
+    index = {c: table.columns.index(c) for c in table.columns}
+    problems = []
+    for part in table.key:
+        groups: dict = {}
+        for row in table.rows:
+            groups.setdefault(row[index[part]], []).append(row)
+        if not any(len(rows) > 1 for rows in groups.values()):
+            continue                                  # unique: it is a key by itself
+        for column in payload:
+            if all(len({row[index[column]] for row in rows}) == 1
+                   for rows in groups.values()):
+                problems.append(
+                    f"{table.name}: '{column}' depends on '{part}' alone, "
+                    f"not on the whole key - not 2NF")
+    return problems
+
+
+def _multivalued_problems(table: Table) -> list[str]:
+    """4NF: two independent many-valued facts about the same thing in one table.
+
+    For a table of exactly three payload columns X, Y, Z: if for every X the
+    rows are the full cross product of X's Y values and X's Z values, then Y
+    and Z are independent facts about X, and storing them together forces
+    every combination to be written out. They belong in two tables.
+    """
+    payload = [c for c in table.columns if not is_metadata(c)]
+    if len(payload) != 3 or len(table.rows) < 4:
+        return []
+    index = {c: table.columns.index(c) for c in payload}
+    problems = []
+    for x in payload:
+        y, z = [c for c in payload if c != x]
+        groups: dict = {}
+        for row in table.rows:
+            groups.setdefault(row[index[x]], set()).add((row[index[y]], row[index[z]]))
+        if len(groups) == len(table.rows):
+            continue                                  # x is unique: it is a key
+        nontrivial = False
+        holds = True
+        for pairs in groups.values():
+            ys = {p[0] for p in pairs}
+            zs = {p[1] for p in pairs}
+            if len(ys) > 1 and len(zs) > 1:
+                nontrivial = True
+            if len(pairs) != len(ys) * len(zs):
+                holds = False
+                break
+        if holds and nontrivial:
+            problems.append(
+                f"{table.name}: '{y}' and '{z}' are independent facts about '{x}' "
+                f"stored together - not 4NF (use two tables)")
+    return problems

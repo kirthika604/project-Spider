@@ -54,13 +54,21 @@ def independent_domains(candidates) -> set:
     return {c.domain for c in candidates if c.domain}
 
 
-def resolve(candidates, rule: str, trusted_order=None) -> Decision:
+def resolve(candidates, rule: str, trusted_order=None, authority=None) -> Decision:
     """Apply the user's conflict rule to the candidates for one cell."""
     if not candidates:
         return Decision([], [], rule)
     groups = group(candidates)
     if len(groups) == 1:
         return Decision(groups[0], [], rule, "all sources agree")
+
+    if authority and rule != "keep_all_and_flag":
+        # a source the user named the authority for this field decides it
+        best = next(g for g in groups if any(c in g for c in authority))
+        losers = [c for g in groups if g is not best for c in g]
+        return Decision(best, losers, rule,
+                        f"{authority[0].domain or authority[0].source_id} is the "
+                        f"authority for this field")
 
     trusted_order = [t.lower() for t in (trusted_order or [])]
 

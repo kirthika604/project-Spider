@@ -31,13 +31,17 @@ def export_target(conn, spec, target: TargetSpec, root: Path) -> ExportResult:
         conn, spec, normal_form=target.normal_form, mode=target.mode,
         include_derived=target.include_derived and spec.output.include_derived,
         min_confidence=target.min_confidence, provenance=target.provenance,
-        naming=target.naming)
+        naming=target.naming, provenance_fields=target.provenance_fields or None)
     if not dataset.passed:
         raise NormalFormError(
             f"target '{target.name}' does not pass its {dataset.normal_form} check:\n  - "
             + "\n  - ".join(dataset.problems)
             + "\nNothing was written. Fix the schema or choose another level.")
 
+    if target.where:
+        _apply_where(conn, dataset, target, spec)
+    if target.multi_value != "child_table":
+        _apply_multi_value(dataset, target)
     dataset = _apply_design(dataset, target, spec)
     if target.shape == "long":
         dataset = _reshape_long(dataset, spec)
@@ -68,6 +72,74 @@ def export_all(conn, spec, root: Path, only: str | None = None) -> list[ExportRe
         if not targets:
             raise NormalFormError(f"no export target called '{only}'")
     return [export_target(conn, spec, t, root) for t in targets]
+
+
+def _matches(cell, wanted) -> bool:
+    options = wanted if isinstance(wanted, list) else [wanted]
+    return str(cell).strip().lower() in {str(o).strip().lower() for o in options}
+
+
+def _apply_where(conn, dataset: Dataset, target: TargetSpec, spec) -> None:
+    """Keep only the rows matching `where`, and only what belongs to them.
+
+    A row filter that left the other tables alone would write junction and
+    provenance rows for records the file no longer has.
+    """
+    survivors: dict[str, set] = {}
+    for column, wanted in target.where.items():
+        for table in dataset.tables:
+            if table.kind != "entity" or column not in table.columns:
+                continue
+            index = table.columns.index(column)
+            table.rows = [r for r in table.rows if _matches(r[index], wanted)]
+    for table in dataset.tables:
+        if table.kind == "entity" and table.key:
+            survivors[table.key[0]] = {r[table.columns.index(table.key[0])]
+                                       for r in table.rows}
+    names: dict[str, set] = {}
+    for key, ids in survivors.items():
+        entity_type = key[:-3] if key.endswith("_id") else key
+        marks = ",".join("?" for _ in ids) or "NULL"
+        names[entity_type] = {r["canonical_name"] for r in conn.execute(
+            f"SELECT canonical_name FROM entities WHERE type=? AND id IN ({marks})",
+            (entity_type, *ids))}
+    for table in dataset.tables:
+        if table.kind == "provenance":
+            index = table.columns.index("entity")
+            typ = table.columns.index("entity_type")
+            table.rows = [r for r in table.rows
+                          if r[typ] not in names or r[index] in names[r[typ]]]
+        elif table.kind in ("junction", "attribute"):
+            for key, ids in survivors.items():
+                if key in table.columns:
+                    index = table.columns.index(key)
+                    table.rows = [r for r in table.rows if r[index] in ids]
+
+
+def _apply_multi_value(dataset: Dataset, target: TargetSpec) -> None:
+    """`multi_value: joined | rows`: fold a many-valued field's child table
+    back into its record, either as one cell or as repeated rows."""
+    for child in [t for t in dataset.tables if t.kind == "attribute"]:
+        key, value_column = child.columns[0], child.columns[1]
+        parent = next((t for t in dataset.tables
+                       if t.kind == "entity" and t.key and t.key[0] == key), None)
+        if parent is None:
+            continue
+        values: dict = {}
+        for row in child.rows:
+            values.setdefault(row[0], []).append(row[1])
+        index = parent.columns.index(key)
+        parent.columns = parent.columns + [value_column]
+        rows = []
+        for row in parent.rows:
+            found = values.get(row[index]) or [None]
+            if target.multi_value == "joined":
+                rows.append(list(row) + ["; ".join(str(v) for v in found if v is not None)
+                                         or None])
+            else:
+                rows.extend(list(row) + [v] for v in found)
+        parent.rows = rows
+        dataset.tables.remove(child)
 
 
 def _convert_columns(table, conversions: dict, spec) -> None:
@@ -408,6 +480,42 @@ def _write_sql(dataset: Dataset, path: Path, target, spec) -> list[Path]:
 
 
 # ----------------------------------------------------------------- metadata
+# What each outside service's data is published under. Spider states it; it
+# does not decide it - check the service's own terms before you rely on it.
+SERVICE_TERMS = {
+    "gbif": ("GBIF Species API", "https://www.gbif.org/terms", "CC0 / CC BY, per dataset"),
+    "wikidata": ("Wikidata", "https://www.wikidata.org/wiki/Wikidata:Licensing", "CC0"),
+    "elevation": ("Open-Elevation / Open-Meteo elevation", "https://open-meteo.com/en/terms",
+                  "CC BY 4.0 (Open-Meteo) - attribution required"),
+    "geocode": ("OpenStreetMap Nominatim", "https://osm.org/copyright",
+                "ODbL - (c) OpenStreetMap contributors"),
+    "lgd": ("Local Government Directory (data.gov.in)", "https://data.gov.in/",
+            "Government Open Data License - India"),
+}
+SOURCE_TERMS = {"osm": ("OpenStreetMap (Overpass)", "https://osm.org/copyright",
+                        "ODbL - (c) OpenStreetMap contributors")}
+
+
+def _attribution(conn, spec) -> list[dict]:
+    """Every outside service used, with the terms that apply to its data (section 15)."""
+    out, seen = [], set()
+
+    def add(name, url, terms, used_for):
+        if name not in seen:
+            seen.add(name)
+            out.append({"service": name, "terms_url": url, "licence": terms,
+                        "used_for": used_for})
+
+    for entry in spec.connectors:
+        key = str((entry.get("name") if isinstance(entry, dict) else entry) or "").lower()
+        if key in SERVICE_TERMS:
+            add(*SERVICE_TERMS[key], "connector")
+    for item in spec.sources.items:
+        if item.type in SOURCE_TERMS:
+            add(*SOURCE_TERMS[item.type], f"source {item.id}")
+        if item.license:
+            add(item.id, item.location, item.license, f"source {item.id}")
+    return out
 def _write_metadata(conn, spec, dataset, target, path, files) -> None:
     folder = path if path.is_dir() else path.parent
     folder.mkdir(parents=True, exist_ok=True)
@@ -431,6 +539,7 @@ def _write_metadata(conn, spec, dataset, target, path, files) -> None:
         "tables": {t.name: len(t.rows) for t in dataset.tables},
         "sources": domains,
         "connectors": [c.get("name") for c in spec.connectors if isinstance(c, dict)],
+        "attribution": _attribution(conn, spec),
         "files": [str(f.relative_to(folder)) if f.is_relative_to(folder) else str(f)
                   for f in files],
         "note": ("Values are labelled extracted, derived or inferred. Every extracted "
@@ -467,5 +576,9 @@ def _write_metadata(conn, spec, dataset, target, path, files) -> None:
         "",
     ]
     readme += [f"- {d['domain']} ({d['pages']} pages)" for d in domains[:25]]
+    if metadata["attribution"]:
+        readme += ["", "## Services used and their terms", ""]
+        readme += [f"- {a['service']}: {a['licence']} ({a['terms_url']})"
+                   for a in metadata["attribution"]]
     readme += ["", "Check each source's terms before republishing its content."]
     (folder / "README.md").write_text("\n".join(readme) + "\n", encoding="utf-8")

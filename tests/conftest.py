@@ -77,3 +77,78 @@ def store_page(conn, url, html, spec, tier=1, crawl_id=1):
     # about a different subject silently scores zero and is never built
     relevance = score_relevance(page, spec.sources.keywords or ["plant"])
     return crawler.save_page(page, crawl_id, relevance, 200, 0, tier)
+
+
+# --------------------------------------------------------------------------
+# A small real website with structure, for requirement tests. It is served over
+# HTTP so the crawler, robots.txt and rate limiting are all genuinely exercised.
+# --------------------------------------------------------------------------
+import http.server
+import socket
+import threading
+
+
+PAGES = {
+    "/index.html": """<html lang="en"><head><title>Index of nothing</title></head><body>
+        <h1>Home</h1><p>welcome</p>
+        <a href="/a.html">A</a> <a href="/b.html">B</a> <a href="/private/x.html">P</a>
+        <a href="http://offsite.invalid/z.html">off</a></body></html>""",
+    # relevant, rich metadata, JSON-LD and a custom-rule field
+    "/a.html": """<html lang="en"><head><title>Alpha plant page</title>
+        <meta name="description" content="About the alpha plant">
+        <meta name="author" content="Dr Rao">
+        <meta property="article:published_time" content="2025-06-14">
+        <script type="application/ld+json">{"@type":"Plant","name":"Alpha"}</script></head>
+        <body><nav>menu</nav><h1>Alpha</h1><h2>Habitat</h2>
+        <p class="alt">Grows at 3,000 to 4,500 m.</p>
+        <p>The plant is a herb. The plant likes cold. The plant is rare.</p>
+        <a href="/c.html">C</a><footer>footer junk</footer></body></html>""",
+    # irrelevant (no keyword) but it links to a relevant page
+    "/b.html": """<html><head><title>Bee</title></head><body><p>nothing here</p>
+        <a href="/d.html">D</a></body></html>""",
+    "/c.html": """<html><head><title>Charlie plant</title></head><body>
+        <h1>Charlie</h1><p>a plant of depth two</p><a href="/e.html">E</a></body></html>""",
+    "/d.html": """<html><head><title>Delta plant</title></head><body>
+        <h1>Delta</h1><p>a plant reached through an irrelevant page</p></body></html>""",
+    "/e.html": """<html><head><title>Echo plant</title></head><body>
+        <h1>Echo</h1><p>a plant of depth three</p></body></html>""",
+    "/private/x.html": "<html><body><p>plant secret</p></body></html>",
+}
+ROBOTS = "User-agent: *\nDisallow: /private/\nCrawl-delay: 0\n"
+
+
+@pytest.fixture
+def multisite():
+    """Yields base URLs for one server reachable under two host names, so 'same
+    domain' and 'other domain' are both real."""
+    class Handler(http.server.BaseHTTPRequestHandler):
+        hits = []
+
+        def do_GET(self):
+            Handler.hits.append(self.path)
+            if self.path == "/robots.txt":
+                body, kind = ROBOTS.encode(), "text/plain"
+            elif self.path in PAGES:
+                body, kind = PAGES[self.path].encode(), "text/html; charset=utf-8"
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    Handler.hits = []
+    yield {"a": f"http://127.0.0.1:{port}", "b": f"http://localhost:{port}",
+           "hits": Handler.hits, "port": port}
+    server.shutdown()

@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..ref import tables as ref
+from ..spec import domain_of as spec_domain
 from ..standardize import names
 from . import proof
 
@@ -152,7 +153,7 @@ class PageExtractor:
         candidates += vocab_candidates
         relations += vocab_relations
 
-        if self.ai is not None:
+        if self.ai is not None and self._ai_allowed(page_row):
             ai_candidates, ai_relations = self._from_ai(page_row, text)
             candidates += ai_candidates
             relations += ai_relations
@@ -174,6 +175,21 @@ class PageExtractor:
         if page_row["source_id"] is None and url.startswith(("http://", "https://")):
             return self.spec.tier_for(url)
         return _tier_of(page_row)
+
+    def _ai_allowed(self, page_row) -> bool:
+        """`ai_allowed: false` keeps a source's text away from the model.
+
+        A page belongs to a source by id (files, endpoints) or, for a crawled
+        page, by the website source whose site it came from.
+        """
+        items = self.spec.sources.items
+        source_id = page_row["source_id"]
+        if source_id is not None:
+            return all(item.ai_allowed for item in items if item.id == source_id)
+        domain = spec_domain(str(page_row["url"] or ""))
+        return all(item.ai_allowed for item in items
+                   if item.type == "website" and item.location
+                   and spec_domain(item.location) == domain)
 
     def _has_required(self, entity_type: str, values) -> bool:
         ent = self.spec.entities.get(entity_type)

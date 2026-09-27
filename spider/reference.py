@@ -328,8 +328,10 @@ SETTINGS: list[Setting] = [
             "can be converted. Spider has no exchange rates of its own and will "
             "not invent one: with no rate, a mismatch is rejected with the reason.",
             "map of currency to number", "{}",
-            example="rates: {USD: 1.0, GBP: 1.27, INR: 0.012}",
-            note="Use the rate for the date your data is about."),
+            example="rates: {USD: 1.0, GBP: 1.27, INR: 0.012}   or   rates: auto",
+            note="`rates: auto` looks each rate up for the date the source page was "
+                 "read, from the free Frankfurter service (European Central Bank "
+                 "rates). Rates you list yourself always win."),
     Setting("standardize.on_conflict",
             "What to do when sources still disagree after cleaning: take the value "
             "most sources give, trust your ranked list, take the newest, or keep "
@@ -393,6 +395,18 @@ SETTINGS: list[Setting] = [
     Setting("output.targets[].min_confidence",
             "Leave out any value below this score in this file.",
             "number", "", example="min_confidence: 0.8"),
+    Setting("output.targets[].where",
+            "Write only the rows whose fields match, for example one region.",
+            "mapping", "", example="where: {region: Uttarakhand}"),
+    Setting("output.targets[].provenance_fields",
+            "With `provenance: columns`, which extras go beside each value: "
+            "confidence, origin, source, quote, fetched_at.",
+            "list", "[confidence, origin, source]",
+            example="provenance_fields: [source, quote, fetched_at]"),
+    Setting("output.targets[].multi_value",
+            "How a field with many values is written: as its own table, joined "
+            "into one cell (\"medicine; tea\"), or as repeated rows.",
+            "choice", "child_table", ("child_table", "joined", "rows")),
     Setting("output.targets[].sort_by",
             "The column to sort on, with `descending: true` to reverse it.",
             "text", "", example="sort_by: altitude_m"),
@@ -412,6 +426,22 @@ SETTINGS: list[Setting] = [
             "registry, a name database, an independent measurement.",
             "list", "[]",
             example="connectors:\n  - {name: gbif, use: [identifier]}"),
+    Setting("connectors[].use",
+            "Which jobs this service may do: for example `aliases`, `identifier`, "
+            "`check_altitude`, `validate_scientific_name`, `place_codes`. Anything "
+            "not listed is ignored.",
+            "list", "everything it can do", example="use: [aliases, identifier]"),
+    Setting("connectors[].daily_cap",
+            "The most live requests this service may be sent in a day. Cached "
+            "answers cost nothing and are not counted.",
+            "number", "no cap", example="daily_cap: 500"),
+    Setting("connectors[].per_second",
+            "The most live requests a second; a polite default of 4.",
+            "number", "4", example="per_second: 1"),
+    Setting("connectors[].key_env",
+            "The name of the environment variable holding this service's key. "
+            "Without it the service is switched off and the rest still works.",
+            "text", "", example="key_env: MY_SERVICE_KEY"),
     Setting("connectors[].for",
             "Which entities to ask this service about.",
             "list", "the service decides", example="for: [plant]"),

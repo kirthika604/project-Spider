@@ -14,6 +14,7 @@ from .spec import Spec, SpecError
 from .store import db as store
 
 EXIT_OK, EXIT_ERROR, EXIT_CHECK_FAILED = 0, 1, 2
+DEFAULT_MAX_PAGES = 100          # for `spider crawl <url>` with no -n and no spider.yaml
 
 
 # ------------------------------------------------------------------ output
@@ -258,13 +259,14 @@ def cmd_crawl(args) -> int:
 
     if args.urls:
         crawler = Crawler(
-            conn, keywords=args.keyword or [], depth=args.depth, max_pages=args.max_pages,
+            conn, keywords=args.keyword or [], depth=args.depth,
+            max_pages=args.max_pages or DEFAULT_MAX_PAGES,
             delay=args.delay, any_domain=args.any_domain,
             domains=(args.domains.split(",") if args.domains else None),
             extract_rules=extract_rules, refresh=args.refresh,
             respect_robots=not args.ignore_robots, on_event=_crawl_printer(args.verbose))
         say(f"Crawling {len(args.urls)} seed(s), depth {args.depth}, "
-            f"max {args.max_pages} pages, {args.delay}s per domain ...")
+            f"max {args.max_pages or DEFAULT_MAX_PAGES} pages, {args.delay}s per domain ...")
         result = crawler.run(args.urls)
         blocked = crawler.politeness.blocked
     else:
@@ -600,6 +602,10 @@ def cmd_build(args) -> int:
         say(f"Review decisions  {result.decisions_applied} reapplied from earlier")
     if result.ai_calls or result.ai_cache_hits:
         say(f"AI calls          {result.ai_calls} ({result.ai_cache_hits} from cache)")
+    notice = _no_ai_notice(spec)
+    if notice:
+        say("")
+        say(notice)
     for item in (result.connectors.get("connectors") or []):
         say(f"Connector         {item['name']}: {item['calls']} call(s) "
             f"({item['cache_hits']} cached), {item['values']} value(s), "
@@ -631,30 +637,15 @@ def cmd_build(args) -> int:
     for error in result.derive_errors[:5]:
         say(f"  derivation: {error}")
 
-    # suggested derivations (FR-25)
-    if spec.derive_policy != "off":
-        from .derive import suggest as suggest_module
-        suggestions = suggest_module.find(conn, spec, use_ai=not args.no_ai)
-        if spec.derive_policy == "auto_safe":
-            applied = [s for s in suggestions if s.safe]
-            suggest_module.save(conn, suggestions)
-            for suggestion in applied:
-                suggest_module.approve(conn, spec, suggestion.name)
-            if applied:
-                from .derive.engine import DeriveEngine
-                DeriveEngine(conn, spec).run([s.name for s in applied])
-                spec.save()
-                say("")
-                say(f"auto_safe applied {len(applied)} exact derivation(s): "
-                    + ", ".join(s.name for s in applied))
-            remaining = [s for s in suggestions if not s.safe]
-        else:
-            suggest_module.save(conn, suggestions)
-            remaining = suggestions
-        if remaining:
-            say("")
-            say(f"{len(remaining)} suggested derivation(s) waiting for you - "
-                f"see `spider report` then `spider derive approve <name>`.")
+    # suggested derivations (FR-25) are worked out by the build itself
+    if result.auto_applied:
+        say("")
+        say(f"auto_safe applied {len(result.auto_applied)} exact derivation(s): "
+            + ", ".join(result.auto_applied))
+    if result.suggested:
+        say("")
+        say(f"{len(result.suggested)} suggested derivation(s) waiting for you - "
+            f"see `spider report` then `spider derive approve <name>`.")
 
     _explain_held_back(conn, spec, result)
 
@@ -664,11 +655,9 @@ def cmd_build(args) -> int:
     except NormalFormError as exc:
         conn.close()
         return fail(str(exc))
-    conn.execute(
-        "INSERT INTO build_reports(built_at,mode,normal_form,passed,changes) "
-        "VALUES(?,?,?,?,?)",
-        (store.now(), spec.mode, dataset.normal_form, int(dataset.passed),
-         jdump(result.standardization)))
+    conn.execute("UPDATE build_reports SET mode=?, normal_form=?, passed=? WHERE id=?",
+                 (spec.mode, dataset.normal_form, int(dataset.passed),
+                  result.build_report_id))
     conn.commit()
 
     say("")
@@ -768,6 +757,15 @@ def cmd_report(args) -> int:
         say(f"  {item.entity_type+'.'+item.field:32} {bar(item.percent/100)} "
             f"{item.percent:5.1f}%  {item.filled}/{item.total}{note}")
 
+    changes = data.standardization.get("changes") or {}
+    if changes:
+        say("")
+        say("Standardization - what was changed, with an example of each")
+        for change, count in changes.items():
+            example = (data.standardization.get("examples") or {}).get(change, [])
+            suffix = f"   e.g. {example[0]}" if example else ""
+            say(f"  {count:5}  {change}{suffix}")
+
     if data.conflicts:
         say("")
         say(f"Conflicts ({len(data.conflicts)}) - every value kept, none hidden")
@@ -815,10 +813,10 @@ def cmd_report(args) -> int:
     say("Source health")
     table_print([{k: v for k, v in s.items() if k in
                   ("domain", "tier", "pages", "values_given", "values_agreed",
-                   "in_review", "avg_confidence")}
+                   "in_review", "rejected", "avg_confidence")}
                  for s in data.sources[:args.limit]],
                 ["domain", "tier", "pages", "values_given", "values_agreed",
-                 "in_review", "avg_confidence"])
+                 "in_review", "rejected", "avg_confidence"])
     say("  values_agreed: values this source confirmed that another source "
         "stored first")
 
@@ -1304,22 +1302,13 @@ def cmd_review(args) -> int:
 def cmd_export(args) -> int:
     root = project_root(args)
     conn = store.connect(root)
-    # the simple page export of the MVP
-    if args.pages:
-        rows = conn.execute(
-            "SELECT id,url,domain,title,description,author,published,lang,word_count,"
-            "relevance,fetched_at FROM pages ORDER BY id").fetchall()
-        if args.format == "json":
-            say(json.dumps([dict(r) for r in rows], indent=2, default=str))
-        elif args.format == "csv":
-            writer = csv.writer(sys.stdout)
-            writer.writerow(rows[0].keys() if rows else ["id"])
-            writer.writerows([list(r) for r in rows])
-        else:
-            for row in rows:
-                say(f"[{row['id']}] {row['title']}\n{row['url']}\n")
-        conn.close()
-        return EXIT_OK
+    # The MVP form: `spider export -f csv > data.csv` dumps the collected pages.
+    # It is what a project with no spider.yaml gets, and what --pages asks for.
+    has_dataset_spec = any((root / name).exists() for name in
+                           ("spider.yaml", "spider.yml", ".spider/spider.yaml"))
+    page_format = args.format if args.format in ("text", "json", "csv") else None
+    if args.pages or (page_format and not has_dataset_spec) or args.format == "text":
+        return _export_pages(conn, page_format or "text")
 
     try:
         spec = load_spec(root, args)
@@ -1363,6 +1352,32 @@ def cmd_export(args) -> int:
     say("Each export folder also has metadata.json and README.md describing "
         "the sources, mode, level and cleaning settings.")
     conn.close()
+    return EXIT_OK
+
+
+def _export_pages(conn, form: str) -> int:
+    """Every collected page, as text, JSON or CSV on standard output."""
+    columns = ["id", "url", "domain", "title", "description", "author", "published",
+               "lang", "headings", "text", "word_count", "relevance", "tier",
+               "fetched_at"]
+    rows = conn.execute(f"SELECT {', '.join(columns)} FROM pages ORDER BY id").fetchall()
+    conn.close()
+    if form == "json":
+        say(json.dumps([dict(r) for r in rows], indent=2, ensure_ascii=False,
+                       default=str))
+    elif form == "csv":
+        writer = csv.writer(sys.stdout)
+        writer.writerow(columns)
+        writer.writerows([[r[c] for c in columns] for r in rows])
+    else:
+        for row in rows:
+            say(f"[{row['id']}] {row['title']}")
+            say(f"{row['url']}")
+            if row["description"]:
+                say(row["description"])
+            say("")
+            say((row["text"] or "").strip())
+            say("-" * 72)
     return EXIT_OK
 
 
@@ -1515,6 +1530,63 @@ def _add_to_yaml(spec, item) -> None:
     items[:] = [i for i in items if not (isinstance(i, dict) and i.get("id") == item.id)]
     items.append(entry)
     spec.save()
+
+
+def _no_ai_notice(spec) -> str:
+    """Say so when web pages cannot fill a field: no rule, and no AI to read it."""
+    from .extract import ai as ai_module
+    if ai_module.available():
+        return ""
+    if not spec.sources.all_seeds():
+        return ""                              # files map their own columns
+    bare = [f"{ent_name}.{name}" for ent_name, ent in spec.entities.items()
+            for name, fld in ent.fields.items()
+            if not fld.extract and not fld.vocabulary and name not in spec.derived
+            and fld.default is None and not any(
+                name in item.map.values() for item in spec.sources.items)]
+    if not bare:
+        return ""
+    return (f"No AI key is set, and {len(bare)} field(s) have no `extract:` rule, so "
+            f"web pages cannot fill them: {', '.join(bare[:6])}"
+            f"{' ...' if len(bare) > 6 else ''}.\n"
+            f"  Add a CSS or regex `extract:` rule to each, or set ANTHROPIC_API_KEY in .env.")
+
+
+# ---------------------------------------------------------------- discover
+def cmd_discover(args) -> int:
+    """Find starting pages from a plain text query (FR-14)."""
+    from .crawl import discovery
+    from .spec import SourceItem
+    root = project_root(args)
+    try:
+        spec = load_spec(root, args)
+    except SpecError:
+        spec = Spec.from_dict({})
+        spec.path = None
+    query = " ".join(args.query).strip()
+    if not query:
+        return fail("say what to look for, e.g. `spider discover \"medicinal plants of Uttarakhand\"`")
+    found, note = discovery.find_seeds(spec, query, limit=args.limit)
+    say(f"Looking for: {query}")
+    say(f"Found {len(found)} page(s) via {note}")
+    if not found:
+        return EXIT_ERROR
+    for url, title in found:
+        say(f"  tier {spec.tier_for(url)}  {url}" + (f"  - {title}" if title else ""))
+    if not args.add:
+        say("")
+        say("Add them as starting pages with --add, or crawl them now with:")
+        say("  spider crawl " + " ".join(url for url, _t in found[:3]))
+        return EXIT_OK
+    if spec.path is None:
+        return fail("--add needs a spider.yaml; run `spider describe` or `spider init` first")
+    for url, _title in found:
+        item = SourceItem(id=discovery.domain_of(url).replace(".", "_")[:40] or "site",
+                          type="website", location=url, tier=spec.tier_for(url))
+        _add_to_yaml(spec, item)
+    say(f"Added {len(found)} website source(s) to {spec.path.name}. "
+        "Run `spider crawl` to read them.")
+    return EXIT_OK
 
 
 # --------------------------------------------------------------- connectors
@@ -1899,6 +1971,15 @@ def build_parser() -> argparse.ArgumentParser:
     crawl.add_argument("-v", "--verbose", action="store_true")
     crawl.set_defaults(func=cmd_crawl)
 
+    discover = subparsers.add_parser(
+        "discover", help="find starting pages from a text query")
+    discover.add_argument("query", nargs="+", help="what you are looking for")
+    discover.add_argument("-n", "--limit", type=int, default=10)
+    discover.add_argument("--add", action="store_true",
+                          help="write the pages into spider.yaml as website sources")
+    discover.add_argument("-f", "--file")
+    discover.set_defaults(func=cmd_discover)
+
     search = subparsers.add_parser("search", help="ranked full-text search")
     search.add_argument("query")
     search.add_argument("-n", "--limit", type=int, default=10)
@@ -2004,7 +2085,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     export = subparsers.add_parser("export", help="write the dataset out")
     export.add_argument("-t", "--target", help="one target from output.targets")
-    export.add_argument("-f", "--format", choices=["csv", "json", "sqlite", "xlsx", "sql"])
+    export.add_argument("-f", "--format",
+                        choices=["text", "csv", "json", "sqlite", "xlsx", "sql"],
+                        help="text, json or csv print the collected pages; the rest "
+                             "write the assembled dataset")
     export.add_argument("--pages", action="store_true",
                         help="export the raw pages instead of the dataset")
     export.add_argument("--pack", action="store_true",

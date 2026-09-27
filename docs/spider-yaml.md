@@ -663,10 +663,10 @@ What each currency is worth, on any one scale you choose, so amounts can be conv
 **Type** map of currency to number &middot; **Default** `{}`
 
 ```yaml
-rates: {USD: 1.0, GBP: 1.27, INR: 0.012}
+rates: {USD: 1.0, GBP: 1.27, INR: 0.012}   or   rates: auto
 ```
 
-Use the rate for the date your data is about.
+`rates: auto` looks each rate up for the date the source page was read, from the free Frankfurter service (European Central Bank rates). Rates you list yourself always win.
 
 ### `standardize.on_conflict`
 
@@ -788,6 +788,32 @@ Leave out any value below this score in this file.
 min_confidence: 0.8
 ```
 
+### `output.targets[].where`
+
+Write only the rows whose fields match, for example one region.
+
+**Type** mapping
+
+```yaml
+where: {region: Uttarakhand}
+```
+
+### `output.targets[].provenance_fields`
+
+With `provenance: columns`, which extras go beside each value: confidence, origin, source, quote, fetched_at.
+
+**Type** list &middot; **Default** `[confidence, origin, source]`
+
+```yaml
+provenance_fields: [source, quote, fetched_at]
+```
+
+### `output.targets[].multi_value`
+
+How a field with many values is written: as its own table, joined into one cell ("medicine; tea"), or as repeated rows.
+
+**Type** choice &middot; **Default** `child_table` &middot; **One of** `child_table`, `joined`, `rows`
+
 ### `output.targets[].sort_by`
 
 The column to sort on, with `descending: true` to reverse it.
@@ -827,6 +853,46 @@ Outside services that feed the same verification chain: a species registry, a na
 ```yaml
 connectors:
   - {name: gbif, use: [identifier]}
+```
+
+### `connectors[].use`
+
+Which jobs this service may do: for example `aliases`, `identifier`, `check_altitude`, `validate_scientific_name`, `place_codes`. Anything not listed is ignored.
+
+**Type** list &middot; **Default** `everything it can do`
+
+```yaml
+use: [aliases, identifier]
+```
+
+### `connectors[].daily_cap`
+
+The most live requests this service may be sent in a day. Cached answers cost nothing and are not counted.
+
+**Type** number &middot; **Default** `no cap`
+
+```yaml
+daily_cap: 500
+```
+
+### `connectors[].per_second`
+
+The most live requests a second; a polite default of 4.
+
+**Type** number &middot; **Default** `4`
+
+```yaml
+per_second: 1
+```
+
+### `connectors[].key_env`
+
+The name of the environment variable holding this service's key. Without it the service is switched off and the rest still works.
+
+**Type** text
+
+```yaml
+key_env: MY_SERVICE_KEY
 ```
 
 ### `connectors[].for`

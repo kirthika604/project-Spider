@@ -106,6 +106,12 @@ def source_health(conn) -> list[dict]:
             "AND (p.domain IS NULL OR p.domain != ?)",
             (f'%"{item["domain"]}"%', item["domain"])).fetchone()["c"]
         item["values_agreed"] = agreed
+        # what this site gave that Spider refused: outside its sanity rules,
+        # or (strict level) outside the allowed vocabulary
+        item["rejected"] = conn.execute(
+            "SELECT COUNT(*) c FROM review_queue WHERE kind IN ('sanity','strict_reject') "
+            "AND json_extract(detail, '$.url') LIKE ?",
+            (f"%://{item['domain']}/%",)).fetchone()["c"] if item["domain"] else 0
         out.append(item)
     return sorted(out, key=lambda r: (-(r["values_given"] or 0),
                                       -(r["values_agreed"] or 0)))

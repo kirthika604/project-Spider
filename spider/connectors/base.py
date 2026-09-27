@@ -8,6 +8,7 @@ a missing key or a service that is down disables that connector only.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 
 import requests
@@ -57,6 +58,10 @@ class Connector:
                 return json.loads(row["response"])
             except ValueError:
                 pass
+        if self.cap_reached():
+            self.capped = True
+            return None
+        self._wait_turn()
         try:
             response = requests.get(url, params=params, timeout=timeout,
                                     headers={"User-Agent": USER_AGENT,
@@ -72,6 +77,28 @@ class Connector:
             (key[:200], f"connector:{self.name}", jdump(data), now()))
         self.conn.commit()
         return data
+
+    capped = False
+    _last_call = 0.0
+
+    def cap_reached(self) -> bool:
+        """`daily_cap` stops a connector from spending a whole quota in one run."""
+        cap = self.config.get("daily_cap")
+        if not cap:
+            return False
+        today = now()[:10]
+        used = self.conn.execute(
+            "SELECT COUNT(*) FROM ai_cache WHERE kind=? AND created_at>=?",
+            (f"connector:{self.name}", today)).fetchone()[0]
+        return used >= int(cap)
+
+    def _wait_turn(self) -> None:
+        """A polite rate limit: `per_second` (default 4) live calls at most."""
+        interval = 1.0 / float(self.config.get("per_second", 4) or 4)
+        wait = self._last_call + interval - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.monotonic()
 
     # entity types this connector is about; None means "ask the schema"
     entity_types: tuple[str, ...] | None = None

@@ -17,7 +17,7 @@ from .standardize.names import normalise
 from .store.db import jdump, now
 
 TEXT_SUFFIXES = {".txt", ".md", ".rst", ".text"}
-SUPPORTED = {".pdf", ".csv", ".tsv", ".xlsx", ".xls", ".json"} | TEXT_SUFFIXES
+SUPPORTED = {".pdf", ".csv", ".tsv", ".xlsx", ".xls", ".json", ".docx"} | TEXT_SUFFIXES
 
 
 @dataclass
@@ -57,13 +57,15 @@ def read_source(conn, spec, item, root: Path) -> SourceTest:
     if not path.exists():
         return SourceTest(item.id, item.type, False, note=f"{path} not found")
     reader = {"pdf": _read_pdf, "csv": _read_csv, "xlsx": _read_xlsx,
-              "json": _read_json, "text": _read_text, "file": _read_text}
+              "json": _read_json, "text": _read_text, "file": _read_text,
+              "docx": _read_docx}
     suffix = path.suffix.lower()
     kind = item.type if item.type in reader else (
         "csv" if suffix in (".csv", ".tsv") else
         "xlsx" if suffix in (".xlsx", ".xls") else
         "pdf" if suffix == ".pdf" else
-        "json" if suffix == ".json" else "text")
+        "json" if suffix == ".json" else
+        "docx" if suffix == ".docx" else "text")
     return reader[kind](conn, spec, item, path)
 
 
@@ -326,6 +328,32 @@ def _read_text(conn, spec, item, path: Path) -> SourceTest:
     return SourceTest(item.id, "text", True, [], 1, f"read {path.name}")
 
 
+def _read_docx(conn, spec, item, path: Path) -> SourceTest:
+    """A Word document: paragraphs and table cells, read with the standard
+    library alone (a .docx is a zip of XML), so it needs no extra install."""
+    import re
+    import zipfile
+    from xml.etree import ElementTree
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    try:
+        with zipfile.ZipFile(path) as archive:
+            root = ElementTree.fromstring(archive.read("word/document.xml"))
+    except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+        return SourceTest(item.id, "docx", False, note=f"cannot read {path.name}: {exc}")
+    lines = []
+    for paragraph in root.iter(f"{ns}p"):
+        text = "".join(t.text or "" for t in paragraph.iter(f"{ns}t"))
+        if text.strip():
+            lines.append(text.strip())
+    text = "\n".join(lines)
+    text = re.sub(r"[ \t]+", " ", text)
+    if not text:
+        return SourceTest(item.id, "docx", False, note=f"{path.name} has no text")
+    crawl_id = _crawl_row(conn, item)
+    _save(conn, item, crawl_id, f"file://{path.resolve()}", path.stem, text, [])
+    return SourceTest(item.id, "docx", True, [], 1, f"read {path.name}")
+
+
 def _read_json(conn, spec, item, path: Path) -> SourceTest:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -368,7 +396,7 @@ def _read_folder(conn, spec, item, path: Path) -> SourceTest:
         fields.update(result.fields_found)
     note = f"{read} files read"
     if skipped:
-        note += f"; skipped {len(skipped)} unsupported: {', '.join(skipped[:5])}"
+        note += f"; skipped {len(skipped)} unsupported: {', '.join(skipped[:20])}"
     return SourceTest(item.id, "folder", True, sorted(fields), read, note)
 
 

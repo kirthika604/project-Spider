@@ -72,8 +72,9 @@ def main() -> None:
                 f"{spec.storage.normal_form}</div>",
                 unsafe_allow_html=True)
         screen = st.radio(
-            "Screen", ["Collect", "Review", "Dataset", "Calculate",
+            "Screen", ["Describe", "Collect", "Review", "Dataset", "Calculate",
                        "Schema and rules", "Search"],
+            index=0 if spec is None else 1,
             label_visibility="collapsed")
         st.divider()
         left, right = st.columns(2)
@@ -83,13 +84,68 @@ def main() -> None:
         left.metric("Values", summary["attributes"])
         right.metric("In review", summary["review_open"])
 
-    if spec_error and screen != "Schema and rules":
+    if spec_error and screen not in ("Schema and rules", "Describe"):
         st.error(spec_error)
+        st.info("New here? Open **Describe** and write what data you want in a sentence.")
         return
 
-    {"Collect": screen_collect, "Review": screen_review, "Dataset": screen_dataset,
+    {"Describe": screen_describe, "Collect": screen_collect, "Review": screen_review, "Dataset": screen_dataset,
      "Calculate": screen_calculate, "Schema and rules": screen_schema,
      "Search": screen_search}[screen](conn, spec, root)
+
+
+# ------------------------------------------------------ screen 1: describe
+EXAMPLE_REQUEST = "plants of Uttarakhand, where they grow, and their uses"
+
+
+def _use_example() -> None:
+    st.session_state["describe_request"] = EXAMPLE_REQUEST
+
+
+def screen_describe(conn, spec, root: Path) -> None:
+    """The new-project wizard (section 13, screen 1): one text box, two choices."""
+    from spider import describe as describe_module
+    from spider.extract import ai as ai_module
+
+    st.header("New project")
+    st.caption("Say what data you want. Spider drafts the schema; you review it "
+               "before anything is collected.")
+    if spec is not None:
+        st.info("This folder already has a spider.yaml. Drafting here writes a new "
+                "one only if you tick the box below.")
+    request = st.text_area("What data do you want?", key="describe_request", height=90,
+                           placeholder=EXAMPLE_REQUEST)
+    st.button("Load an example", on_click=_use_example)
+    mode = st.radio("Mode", ["project", "analysis"], horizontal=True,
+                    format_func=lambda m: "Project (3NF or higher)" if m == "project"
+                    else "Analysis (flat is fine)")
+    sites = st.text_input("Trusted sites (optional, comma separated)", "",
+                          placeholder="forest.gov.in, example-botany-institute.org")
+    if not ai_module.available():
+        st.info("No AI key is set, so the draft uses simple rules. Add "
+                "ANTHROPIC_API_KEY to .env for a better one - or carry on: "
+                "you can edit everything in the next screen.")
+
+    if st.button("Draft my schema", type="primary") and request.strip():
+        seeds = [f"https://{s.strip()}" if "://" not in s.strip() else s.strip()
+                 for s in sites.split(",") if s.strip()]
+        document, questions, how = describe_module.draft(
+            request.strip(), mode=mode, seeds=seeds, use_ai=ai_module.available())
+        st.session_state["draft"] = (describe_module.to_yaml(document), questions, how)
+
+    if "draft" in st.session_state:
+        text, questions, how = st.session_state["draft"]
+        st.subheader(f"Draft ({how})")
+        st.code(text, language="yaml")
+        for question in questions:
+            st.write(f"- {question}")
+        replace = st.checkbox("Replace my current spider.yaml", value=False) \
+            if spec is not None else True
+        if st.button("Save as spider.yaml") and replace:
+            (root / "spider.yaml").write_text(text, encoding="utf-8")
+            del st.session_state["draft"]
+            st.success("Saved. Open **Schema and rules** to review it, then **Collect**.")
+            st.rerun()
 
 
 # ------------------------------------------------------ screen 3: collect
@@ -108,6 +164,19 @@ def screen_collect(conn, spec, root: Path) -> None:
         delay = st.number_input("Delay per domain (s)", 0.0, 10.0,
                                 float(spec.sources.delay_seconds), step=0.5)
 
+    with st.expander("Don't know where to start? Describe what you want"):
+        question = st.text_input("What are you looking for?", "",
+                                 placeholder="medicinal plants of Uttarakhand",
+                                 key="discover_query")
+        if st.button("Find starting pages") and question.strip():
+            from spider.crawl.discovery import find_seeds
+            found, note = find_seeds(spec, question.strip(), limit=8)
+            st.caption(f"Found via {note}")
+            for url, title in found:
+                st.write(f"tier {spec.tier_for(url)} - {url}" + (f" - {title}" if title else ""))
+            if not found:
+                st.info("Nothing found. Paste a link into the seed box instead.")
+
     if st.button("Start crawl", type="primary"):
         from spider.crawl.crawler import Crawler
         rules: dict[str, list[str]] = {}
@@ -116,13 +185,16 @@ def screen_collect(conn, spec, root: Path) -> None:
                 if fld.extract:
                     rules.setdefault(name, []).extend(fld.extract)
         progress = st.progress(0.0)
+        live = st.empty()
         log = st.empty()
         lines: list[str] = []
         counters = {"saved": 0, "rejected": 0}
+        tiers: dict = {}
 
         def on_event(kind, **info):
             if kind == "saved":
                 counters["saved"] += 1
+                tiers[info.get("tier")] = tiers.get(info.get("tier"), 0) + 1
                 lines.append(f"OK   {info['url'][:70]}  tier {info.get('tier')}  "
                              f"relevance {info.get('relevance', 0):.0f}")
             else:
@@ -130,8 +202,14 @@ def screen_collect(conn, spec, root: Path) -> None:
                 lines.append(f"{kind.upper()[:4]:4} {info.get('url','')[:70]}  "
                              f"{info.get('reason','')}")
             progress.progress(min(1.0, counters["saved"] / max(1, int(max_pages))))
+            live.markdown(
+                f"**{counters['saved']}** saved &middot; **{counters['rejected']}** "
+                f"skipped &middot; by tier: "
+                + (", ".join(f"tier {t}: {n}" for t, n in sorted(
+                    tiers.items(), key=lambda kv: str(kv[0]))) or "none yet"))
             log.code("\n".join(lines[-14:]))
 
+        spec.use_reference(conn)
         crawler = Crawler(
             conn, keywords=[k.strip() for k in keywords.split(",") if k.strip()],
             depth=int(depth), max_pages=int(max_pages), delay=float(delay),
@@ -337,7 +415,42 @@ def screen_dataset(conn, spec, root: Path) -> None:
             st.write(f"- {problem}")
 
     table = dataset.table(entity_type) or dataset.tables[0]
-    st.dataframe(table.as_dicts(), use_container_width=True, hide_index=True)
+    rows = table.as_dicts()
+    needle = st.text_input("Filter rows", "", placeholder="type part of any value",
+                           key="dataset_filter").strip().lower()
+    if needle:
+        rows = [r for r in rows
+                if any(needle in str(v).lower() for v in r.values() if v is not None)]
+    st.caption(f"{len(rows)} of {len(table.rows)} rows")
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+    if rows:
+        import csv as csv_module
+        import io
+        import json as json_module
+        buffer = io.StringIO()
+        writer = csv_module.DictWriter(buffer, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+        left, right = st.columns(2)
+        left.download_button("Download these rows (CSV)", buffer.getvalue(),
+                             file_name=f"{table.name}.csv", mime="text/csv")
+        right.download_button("Download these rows (JSON)",
+                              json_module.dumps(rows, indent=2, default=str),
+                              file_name=f"{table.name}.json", mime="application/json")
+
+    if st.checkbox("Show how sure Spider is about each value"):
+        detail = [dict(r) for r in conn.execute(
+            "SELECT e.canonical_name AS record, a.name AS field, a.value, a.unit, "
+            "a.origin, a.confidence, a.tier, a.status, p.url AS source "
+            "FROM attributes a JOIN entities e ON e.id=a.entity_id "
+            "LEFT JOIN pages p ON p.id=a.source_page "
+            "WHERE e.type=? AND a.status IN ('accepted','review') "
+            "ORDER BY e.canonical_name, a.name, a.confidence DESC LIMIT 2000",
+            (entity_type,))]
+        if needle:
+            detail = [r for r in detail
+                      if any(needle in str(v).lower() for v in r.values() if v is not None)]
+        st.dataframe(detail, use_container_width=True, hide_index=True)
 
     st.subheader("Coverage")
     for item in coverage(conn, spec):
@@ -388,7 +501,29 @@ def screen_dataset(conn, spec, root: Path) -> None:
         st.table([{"field": f"{g['entity_type']}.{g['field']}", "missing": g["missing"],
                    "of": g["total"], "for example": ", ".join(g["examples"][:3])}
                   for g in open_gaps])
-        st.caption("Run `spider fill` to search for these.")
+        st.caption("Or press the button: Spider writes a search for each empty cell, "
+                   "crawls what it finds and rebuilds.")
+        if st.button("Search for missing values"):
+            _fill_gaps(conn, spec, open_gaps)
+
+
+def _fill_gaps(conn, spec, open_gaps) -> None:
+    """The dashboard's 'search for missing values' (FR-13, FR-20)."""
+    from spider.assemble.build import build
+    from spider.crawl.crawler import crawl_from_spec
+    from spider.crawl.discovery import discover, queries_for_gaps
+    queries = queries_for_gaps(conn, spec, open_gaps, limit=8)
+    with st.spinner("Searching for the empty cells ..."):
+        urls, note = discover(conn, spec, queries, limit=20)
+        st.write(note)
+        if not urls:
+            st.info("No new sources found. Add seeds, or set a search key "
+                    "(BRAVE_API_KEY, SERPER_API_KEY or TAVILY_API_KEY).")
+            return
+        result = crawl_from_spec(conn, spec, seeds=urls, max_pages=20, depth=1, kind="fill")
+        built = build(conn, spec, use_ai=False)
+    st.success(f"{result.saved} new pages read; the dataset now has "
+               f"{built.attributes} values.")
 
 
 def _use_recipe(recipe: str) -> None:

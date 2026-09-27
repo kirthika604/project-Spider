@@ -44,11 +44,46 @@ class Standardizer:
             self.examples[change].append(example)
 
     # ------------------------------------------------------------------ api
-    def standardize(self, entity_type: str, field_name: str, raw_value) -> StandardValue:
+    def rate_on(self, source: str, target: str, on_date: str | None):
+        """The rate to turn `source` into `target` on a date, or None.
+
+        Looked up once per (date, pair) from Frankfurter (ECB reference rates,
+        no key) and kept in the project's cache, so a rebuild asks nothing.
+        """
+        if not self.spec.standardize.rates_auto:
+            return None
+        day = (on_date or "")[:10] or "latest"
+        key = f"fx:{day}:{source}:{target}"
+        row = self.conn.execute("SELECT response FROM ai_cache WHERE key=?",
+                                (key,)).fetchone()
+        if row:
+            try:
+                return float(row["response"]) or None
+            except ValueError:
+                return None
+        try:
+            import requests
+            from .. import USER_AGENT
+            response = requests.get(
+                f"https://api.frankfurter.app/{day}",
+                params={"from": source, "to": target},
+                headers={"User-Agent": USER_AGENT}, timeout=15)
+            rate = float(response.json()["rates"][target])
+        except Exception:
+            return None                       # not cached: a later build may succeed
+        from ..store.db import now
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ai_cache(key,kind,response,created_at) VALUES(?,?,?,?)",
+            (key, "fx", str(rate), now()))
+        return rate
+
+    def standardize(self, entity_type: str, field_name: str, raw_value,
+                    on_date: str | None = None) -> StandardValue:
         fld = self.spec.entity_field(entity_type, field_name)
         level = self.spec.field_level(entity_type, field_name)
         raw = names.normalise(raw_value)
         result = StandardValue(value=raw, raw=str(raw_value or "").strip())
+        self._on_date = on_date
 
         if result.raw and raw != result.raw.strip():
             self._note("text normalized", f"{result.raw!r} -> {raw!r}")
@@ -83,7 +118,9 @@ class Standardizer:
         if _is_money_field(fld, raw):
             money = _currency_value(raw, fld.unit if fld else None,
                                     self.spec.standardize.currency,
-                                    self.spec.standardize.rates)
+                                    self.spec.standardize.rates,
+                                    lookup=lambda a, b: self.rate_on(
+                                        a, b, getattr(self, "_on_date", None)))
             if money is not None:
                 value, currency, changed, problem = money
                 if problem:
@@ -232,7 +269,7 @@ def _is_money_field(fld, raw: str) -> bool:
 
 
 def _currency_value(raw: str, field_unit: str, project_currency: str,
-                    rates: dict) -> tuple:
+                    rates: dict, lookup=None) -> tuple:
     """(amount, currency, converted, problem) for a written amount.
 
     What an amount is stored in comes from, in order: the field's own declared
@@ -256,9 +293,13 @@ def _currency_value(raw: str, field_unit: str, project_currency: str,
         return amount, source, False, None
 
     have = {k.upper(): float(v) for k, v in (rates or {}).items()}
+    if (source not in have or target not in have) and lookup is not None:
+        rate = lookup(source, target)          # dated, from the source's own day
+        if rate:
+            return amount * rate, target, True, None
     if source not in have or target not in have:
         missing = source if source not in have else target
         return None, source, False, (
             f"written in {source} but this field is in {target}, and there is no "
-            f"rate for {missing} - add it under standardize.rates")
+            f"rate for {missing} - add it under standardize.rates, or set `rates: auto`")
     return amount * have[source] / have[target], target, True, None

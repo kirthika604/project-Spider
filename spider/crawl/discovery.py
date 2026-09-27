@@ -121,6 +121,33 @@ def discover(conn, spec, queries, limit: int = 40) -> tuple[list[str], str]:
     return ordered, note
 
 
+def find_seeds(spec, query: str, limit: int = 10) -> tuple[list[tuple[str, str]], str]:
+    """Seed discovery from a plain text query (FR-14).
+
+    Uses whichever search API has a key. With none, it falls back to
+    Wikipedia's open search, which needs no key, so `spider discover` works on
+    a fresh machine. Returns (url, title) pairs and a note saying where they
+    came from.
+    """
+    name, key = available_api()
+    if name:
+        urls = _search(name, key, query, count=limit)
+        return [(u, "") for u in urls if is_crawlable(u)][:limit], f"{name} search"
+    try:
+        response = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={"action": "opensearch", "search": query, "limit": limit,
+                    "namespace": 0, "format": "json"},
+            headers={"User-Agent": USER_AGENT}, timeout=15)
+        data = response.json()
+        titles, links = data[1], data[3]
+        return list(zip(links, titles))[:limit], (
+            "Wikipedia open search (no search key set - "
+            "set BRAVE_API_KEY, SERPER_API_KEY or TAVILY_API_KEY for the whole web)")
+    except Exception as exc:
+        return [], f"search unavailable ({type(exc).__name__})"
+
+
 def _search(api: str, key: str, query: str, count: int = 10) -> list[str]:
     try:
         if api == "brave":

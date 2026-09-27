@@ -284,6 +284,17 @@ standardize:
 Without a rate, a mismatch is rejected with the reason rather than converted
 with a number nobody chose.
 
+Or let Spider look the rate up **for the day each source page was read**:
+
+```yaml
+standardize:
+  currency: INR
+  rates: auto          # Frankfurter (European Central Bank rates), no key needed
+```
+
+Rates you list yourself always win, every looked-up rate is cached, and the
+original text is kept beside the converted value.
+
 ### When values are held back
 
 One source alone scores 0.80 (tier 1), 0.60 (tier 2) or 0.40 (tier 3), and a
@@ -324,6 +335,7 @@ Repeat 5 to 7 until the report satisfies you.
 | --- | --- |
 | `spider init` | create the project and reference databases |
 | `spider describe "..."` | draft `spider.yaml` from words, `--like` an example file, or `--from` a schema (`--ask` for the questions) |
+| `spider discover "..."` | find starting pages from a plain query (`--add` writes them into `spider.yaml`); works with no key via Wikipedia's open search |
 | `spider settings [name]` | what every setting means, with its default and an example |
 | `spider preview` | run the whole chain on a few pages before the full crawl |
 | `spider check` | validate the project file |
@@ -822,6 +834,9 @@ sources:
 
 Nested JSON is flattened, so `measurement.elevation` reaches a nested field.
 
+Word documents (`.docx`) are read too, with no extra install. A folder is read
+file by file and the files it could not read are listed by name.
+
 `sources.mode` decides how far Spider may wander: `only_listed` (never leaves
 your list), `start_here` (follows links within those sites) or
 `start_here_and_discover` (also searches, and new sites enter at tier 3).
@@ -852,6 +867,21 @@ $ spider connectors
   wikidata   9 calls, 96 names, 5 identifiers      # जटामांसी, அதிவிடயம், burans
   skipped: gbif: nothing to ask about 'region'
 ```
+
+The rules every connector follows:
+
+| Rule | Setting |
+| --- | --- |
+| Only do the jobs you list | `use: [aliases, identifier]` |
+| Never overspend a quota | `daily_cap: 500` (cached answers are free) |
+| Be polite | `per_second: 4` by default |
+| A missing key switches only that connector off, with a message | `key_env: MY_KEY` |
+| Values pass the same sanity ranges as crawled ones | automatic |
+| Official Indian place codes, from the list you loaded with `spider ref load` | `{name: lgd, use: [place_codes]}` |
+
+Every export lists the services it used and the terms their data comes
+under (GBIF, Wikidata, OpenStreetMap's ODbL and so on) in `metadata.json` and
+its `README.md`. Check each service's own terms before you republish.
 
 A cross-check changes confidence, never the value: if the elevation service
 disagrees with the pages by more than the tolerance, both are kept and the
@@ -892,7 +922,9 @@ output:
 | Provenance | `separate_table`, `columns` (beside each value), or `none` |
 | Names | per-column `label`, and `naming: snake_case / camelCase / Title Case` |
 | Units | per-column `unit:`, converted on the way out |
-| Filters | `min_confidence`, `include_derived` |
+| Filters | `min_confidence`, `include_derived`, `where: {region: Uttarakhand}` |
+| Extras | `provenance_fields: [source, quote, fetched_at]` beside each value |
+| Many-valued fields | `multi_value: child_table` (default), `joined` ("medicine; tea") or `rows` |
 | Sorting | `sort_by` with `descending` |
 
 The exported SQLite file carries real primary and foreign keys, so an app can
